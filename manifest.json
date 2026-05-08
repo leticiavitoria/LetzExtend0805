@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Lets Automate",
-  "version": "3.0.0",
-  "description": "Disparo automatico de prompts com elementos para Veo 3 — Versao completa com geracao em 2o plano, auto-download e reenvio automatico.",
+  "version": "3.1.0",
+  "description": "Disparo automatico de prompts com elementos para Veo 3 — Inclui automacao da funcao Estender (cenas longas via BASE+EXT).",
   "author": "Lets Automate",
 
   "permissions": [

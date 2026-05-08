@@ -19,6 +19,7 @@
         <button class="tab-btn active" data-tab="video" id="tabBtnVideo">&#9654; Video</button>
         <button class="tab-btn" data-tab="frame" id="tabBtnFrame">&#127912; Frame</button>
         <button class="tab-btn" data-tab="image" id="tabBtnImage">&#128247; Imagem</button>
+        <button class="tab-btn" data-tab="extend" id="tabBtnExtend">&#11206; Estender</button>
       </div>
 
       <!-- Configuracoes compartilhadas -->
@@ -300,11 +301,97 @@ PROMPT 3: Descricao sem referencias (so texto)..."></textarea>
         </div>
       </div>
 
+      <!-- ==================== ABA ESTENDER ==================== -->
+      <div class="tab-content" id="tabContentExtend">
+        <div class="tab-blocked hidden" id="extendBlockedOverlay">
+          Outra aba em processamento. Aguarde.
+        </div>
+        <div class="card" id="extendSettingsCard">
+          <div class="card-title">Cenas com Extensao</div>
+          <div class="setting-row">
+            <label>Pasta:</label>
+            <input type="text" id="extendFolder" value="LetzScenes" class="folder-input">
+          </div>
+          <div class="setting-row">
+            <label>Modelo Lower Priority:</label>
+            <label class="toggle">
+              <input type="checkbox" id="extendUseLite" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card" id="extendInputSection">
+          <div class="card-title">Cenas (BASE + extensoes)</div>
+          <textarea id="extendPromptsInput" placeholder="SCENE 1:
+BASE: Plano aberto da floresta ao amanhecer, camera avanca lentamente...
+EXT: A camera passa entre as arvores e revela uma clareira...
+EXT: Um cervo entra em quadro e olha para a camera...
+
+SCENE 2 [1]:
+BASE: Interior de cabana, fogo na lareira...
+EXT: A porta se abre lentamente revelando uma silhueta..."></textarea>
+        </div>
+
+        <div class="card hidden" id="extendPromptListCard">
+          <div class="prompt-list-header">
+            <div class="card-title" style="margin-bottom: 0;">Fila de Cenas</div>
+            <span class="prompt-count" id="extendPromptCount">0/0</span>
+          </div>
+          <div class="prompt-list" id="extendPromptItems"></div>
+        </div>
+
+        <div class="progress-container hidden" id="extendProgressContainer">
+          <div class="progress-bar">
+            <div class="progress-fill" id="extendProgressFill"></div>
+          </div>
+          <div class="progress-text" id="extendProgressText">0%</div>
+          <div class="timer hidden" id="extendTimer">02:00</div>
+        </div>
+        <div class="folder-reminder hidden" id="extendFolderReminder"></div>
+
+        <button id="extendProcessBtn" class="btn btn-silver">Processar Cenas</button>
+        <button id="extendStartBtn" class="btn btn-primary hidden">Iniciar Envio</button>
+        <button id="extendStopBtn" class="btn btn-danger hidden">Parar</button>
+        <button id="extendEmergencyStopBtn" class="btn btn-emergency hidden">PARADA DE EMERGENCIA</button>
+        <button id="extendCancelAllBtn" class="btn btn-cancel-all hidden">Cancelar Tudo</button>
+
+        <div class="info-box" id="extendFormatInfo">
+          <strong>Formato:</strong><br>
+          <code>SCENE N [refs]:</code> cabecalho do bloco (refs opcionais)<br>
+          <code>BASE: texto...</code> prompt base (8s, 1 por cena)<br>
+          <code>EXT: texto...</code> extensao (+7s, 1 a 20 por cena)<br>
+          Duracao total = 8 + 7&middot;N segundos. Apenas o video final eh baixado.
+        </div>
+
+        <div class="card hidden" id="extendStatusCard">
+          <div class="card-title">Status das Cenas</div>
+          <div class="video-stats">
+            <div class="stat">
+              <span class="stat-value" id="extendSent">0</span>
+              <span class="stat-label">Enviadas</span>
+            </div>
+            <div class="stat stat-success">
+              <span class="stat-value" id="extendGenerated">0</span>
+              <span class="stat-label">Concluidas</span>
+            </div>
+            <div class="stat stat-warning">
+              <span class="stat-value" id="extendFailed">0</span>
+              <span class="stat-label">Falhas</span>
+            </div>
+            <div class="stat stat-info">
+              <span class="stat-value" id="extendDownloaded">0</span>
+              <span class="stat-label">Baixadas</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
   <div class="footer">
-    <span>Lets Automate v3.0.0</span>
+    <span>Lets Automate v3.1.0</span>
   </div>
 
   <script src="panel.js"></script>
