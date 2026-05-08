@@ -4261,6 +4261,32 @@
                 sendResponse({ success: true });
                 break;
 
+            // ===== v3.1.0 EXTEND =====
+            case "EXTEND_RUN_BASE":
+                runExtendBase(message.scene).then(r => sendResponse(r || { success: true }))
+                    .catch(e => sendResponse({ success: false, error: e.message }));
+                return true;
+
+            case "EXTEND_RUN_EXT":
+                runExtendExt(message.scene).then(r => sendResponse(r || { success: true }))
+                    .catch(e => sendResponse({ success: false, error: e.message }));
+                return true;
+
+            case "EXTEND_DOWNLOAD":
+                runExtendDownload(message.scene).then(r => sendResponse(r || { success: true }))
+                    .catch(e => sendResponse({ success: false, error: e.message }));
+                return true;
+
+            case "SCENE_UPDATE_BRIDGE":
+                notifyPanel({ type: "SCENE_UPDATE", data: message.data });
+                sendResponse({ success: true });
+                break;
+
+            case "SCENE_QUEUE_COMPLETE_BRIDGE":
+                notifyPanel({ type: "SCENE_QUEUE_COMPLETE" });
+                sendResponse({ success: true });
+                break;
+
             default:
                 sendResponse({ success: false, error: "unknown_action" });
         }
@@ -4559,5 +4585,276 @@
         document.addEventListener("DOMContentLoaded", init);
     } else {
         init();
+    }
+
+    // ============================================================
+    // EXTEND (SCENE) AUTOMATION — v3.1.0
+    // BASE: envia prompt na home do projeto, captura mediaId via interceptor.
+    // EXT: clica thumb -> botao Estender -> dropdown modelo -> textarea -> submit.
+    // Download final via DOWNLOAD_VIDEO ja existente.
+    // ============================================================
+    let _extendPending = null; // {sceneNumber, kind: 'base'|'ext'}
+    let _extendListenerInstalled = false;
+
+    function _installExtendInterceptListener() {
+        if (_extendListenerInstalled) return;
+        _extendListenerInstalled = true;
+        document.addEventListener('dotti-video-submitted', (e) => {
+            try {
+                if (!_extendPending) return;
+                const media = e.detail?.media || [];
+                if (!media.length || !media[0]?.mediaId) return;
+                // Pega o mais recente
+                const mediaId = media[media.length - 1].mediaId;
+                const pending = _extendPending;
+                _extendPending = null;
+                const action = pending.kind === 'base' ? 'EXTEND_BASE_SUBMITTED' : 'EXTEND_EXT_SUBMITTED';
+                console.log('[Extend] mediaId capturado (' + pending.kind + '):', mediaId.substring(0, 12));
+                chrome.runtime.sendMessage({ action, sceneNumber: pending.sceneNumber, mediaId }).catch(() => {});
+            } catch (err) {
+                console.error('[Extend] interceptListener err:', err);
+            }
+        });
+    }
+
+    function _findByText(selector, textNeedle, opts) {
+        const exact = opts?.exact || false;
+        const needle = String(textNeedle).toLowerCase().trim();
+        const nodes = Array.from(document.querySelectorAll(selector));
+        for (const n of nodes) {
+            if (n.offsetParent === null && !opts?.allowHidden) continue;
+            const t = (n.textContent || '').toLowerCase().trim();
+            if (exact ? t === needle : t.includes(needle)) return n;
+        }
+        return null;
+    }
+
+    async function _trustedClickEl(el) {
+        if (!el) return false;
+        try {
+            el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            await sleep(150);
+            const r = el.getBoundingClientRect();
+            const x = Math.round(r.left + r.width / 2);
+            const y = Math.round(r.top + r.height / 2);
+            const res = await chrome.runtime.sendMessage({ action: 'TRUSTED_CLICK', x, y });
+            if (res?.success) return true;
+        } catch (e) {
+            console.log('[Extend] trustedClick err:', e.message);
+        }
+        // Fallback: dispatchFullClick
+        try { dispatchFullClick(el); return true; } catch (e) { return false; }
+    }
+
+    async function _waitForElement(finder, timeoutMs, interval) {
+        const t0 = Date.now();
+        const step = interval || 250;
+        while (Date.now() - t0 < (timeoutMs || 8000)) {
+            const el = finder();
+            if (el) return el;
+            await sleep(step);
+        }
+        return null;
+    }
+
+    function _findEstenderButton() {
+        // Botao na barra inferior do detalhe do video
+        const btns = Array.from(document.querySelectorAll('button'));
+        for (const b of btns) {
+            if (b.offsetParent === null) continue;
+            const t = (b.textContent || '').toLowerCase().trim();
+            if (t === 'estender' || t.startsWith('estender') || t.includes('extend')) return b;
+        }
+        return null;
+    }
+
+    function _findModelDropdownTrigger() {
+        // Botao com texto "Veo 3.1 - ..." (na barra do submit)
+        const btns = Array.from(document.querySelectorAll('button'));
+        for (const b of btns) {
+            if (b.offsetParent === null) continue;
+            const t = (b.textContent || '').trim();
+            if (/^Veo\s*3\.1\b/i.test(t)) return b;
+        }
+        return null;
+    }
+
+    function _findLowerPriorityOption() {
+        // Item do dropdown com texto "Veo 3.1 - Lite [Lower Priority]"
+        // Pode ser <li>, <button>, <div role="menuitem">, etc.
+        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div'];
+        for (const sel of sels) {
+            const nodes = Array.from(document.querySelectorAll(sel));
+            for (const n of nodes) {
+                if (n.offsetParent === null) continue;
+                const t = (n.textContent || '').trim();
+                if (/Veo\s*3\.1\s*-?\s*Lite\s*\[?\s*Lower\s*Priority/i.test(t)) {
+                    // Garantir que nao e a opcao "Fast [Lower Priority]"
+                    if (/Fast/i.test(t)) continue;
+                    return n;
+                }
+            }
+        }
+        return null;
+    }
+
+    function _findTextareaForExtend() {
+        // Slate textbox visivel com placeholder "Qual e a proxima etapa?"
+        const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
+        for (const t of tbs) {
+            if (t.offsetParent === null) continue;
+            return t;
+        }
+        return null;
+    }
+
+    function _findSidebarThumbByMediaId(mediaId) {
+        if (!mediaId) return null;
+        // Tenta achar img/video/elemento com src ou data-* contendo o mediaId (fragmento)
+        const frag = mediaId.split('/').pop().split(':').pop();
+        const candidates = Array.from(document.querySelectorAll('img, video, [data-media-id], [data-id]'));
+        for (const c of candidates) {
+            const src = c.src || c.getAttribute('data-media-id') || c.getAttribute('data-id') || '';
+            if (src && src.includes(frag)) {
+                // subir ate um clicavel
+                let parent = c.closest('button, a, [role="button"], [role="listitem"]') || c.parentElement;
+                return parent || c;
+            }
+        }
+        return null;
+    }
+
+    async function runExtendBase(scene) {
+        console.log('[Extend] runExtendBase SCENE', scene.number);
+        _installExtendInterceptListener();
+        try {
+            // Garantir que estamos na home do projeto: clicar voltar se houver
+            await _ensureProjectHome();
+
+            // Lidar com elementos (refs de imagem) caso existam
+            if (Array.isArray(scene.elements) && scene.elements.length) {
+                console.log('[Extend] aviso: BASE com [refs] (' + scene.elements.join(',') + ') — selecionar manualmente nao implementado');
+            }
+
+            // Preencher textarea principal
+            const filled = await fillTextarea(scene.text);
+            if (!filled) throw new Error('fill_textarea_failed');
+
+            // Marcar pending ANTES do submit
+            _extendPending = { sceneNumber: scene.number, kind: 'base' };
+
+            // Submit
+            const ok = await clickCreateButton();
+            if (!ok) {
+                _extendPending = null;
+                chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: 'submit_failed' }).catch(() => {});
+                return { success: false };
+            }
+            return { success: true };
+        } catch (e) {
+            console.error('[Extend] runExtendBase erro:', e.message);
+            _extendPending = null;
+            chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: e.message }).catch(() => {});
+            return { success: false, error: e.message };
+        }
+    }
+
+    async function _ensureProjectHome() {
+        // Se estamos no detalhe do video, clicar no botao voltar (seta superior esquerda)
+        const back = document.querySelector('button[aria-label*="Voltar" i], button[aria-label*="Back" i], a[aria-label*="Voltar" i]');
+        if (back && back.offsetParent !== null) {
+            console.log('[Extend] voltando para home do projeto');
+            await _trustedClickEl(back);
+            await sleep(800);
+        }
+    }
+
+    async function runExtendExt(scene) {
+        console.log('[Extend] runExtendExt SCENE', scene.number, 'idx', scene.extIdx);
+        _installExtendInterceptListener();
+        try {
+            // 1) Garantir que o detalhe do video correto esta aberto
+            const inDetail = !!_findEstenderButton();
+            if (!inDetail) {
+                // Clicar no thumb do mediaId atual no grid
+                const thumb = _findSidebarThumbByMediaId(scene.baseMediaId);
+                if (!thumb) throw new Error('thumb_not_found');
+                await _trustedClickEl(thumb);
+                await sleep(1200);
+            }
+
+            // 2) Clicar no botao "Estender"
+            const estenderBtn = await _waitForElement(_findEstenderButton, 6000);
+            if (!estenderBtn) throw new Error('estender_btn_not_found');
+            await _trustedClickEl(estenderBtn);
+            await sleep(600);
+
+            // 3) Selecionar modelo Lower Priority (so na 1a EXT da cena)
+            if (scene.useLite && scene.isFirstExt) {
+                const trigger = await _waitForElement(_findModelDropdownTrigger, 4000);
+                if (trigger) {
+                    await _trustedClickEl(trigger);
+                    await sleep(400);
+                    const opt = await _waitForElement(_findLowerPriorityOption, 4000);
+                    if (opt) {
+                        await _trustedClickEl(opt);
+                        await sleep(300);
+                    } else {
+                        console.warn('[Extend] opcao Lower Priority nao encontrada — seguindo com modelo atual');
+                    }
+                } else {
+                    console.warn('[Extend] dropdown de modelo nao encontrado — seguindo com modelo atual');
+                }
+            }
+
+            // 4) Preencher textarea com texto da extensao
+            const ta = await _waitForElement(_findTextareaForExtend, 4000);
+            if (!ta) throw new Error('textarea_not_found');
+            const filled = await fillTextarea(scene.text);
+            if (!filled) throw new Error('fill_textarea_failed');
+            await sleep(200);
+
+            // 5) Marcar pending e submeter
+            _extendPending = { sceneNumber: scene.number, kind: 'ext' };
+            const ok = await clickCreateButton();
+            if (!ok) {
+                _extendPending = null;
+                throw new Error('submit_failed');
+            }
+            return { success: true };
+        } catch (e) {
+            console.error('[Extend] runExtendExt erro:', e.message);
+            _extendPending = null;
+            chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: e.message }).catch(() => {});
+            return { success: false, error: e.message };
+        }
+    }
+
+    async function runExtendDownload(scene) {
+        console.log('[Extend] runExtendDownload SCENE', scene.number, 'mediaId=' + (scene.mediaId || '?').substring(0, 12));
+        try {
+            // Tenta achar a URL do video com base no mediaId
+            const frag = (scene.mediaId || '').split('/').pop().split(':').pop();
+            let videoUrl = null;
+            const videos = Array.from(document.querySelectorAll('video'));
+            for (const v of videos) {
+                const src = v.src || v.querySelector('source')?.src || '';
+                if (src && (!frag || src.includes(frag))) { videoUrl = src; break; }
+            }
+            if (!videoUrl && videos.length) videoUrl = videos[videos.length - 1].src;
+            if (!videoUrl) throw new Error('video_url_not_found');
+
+            const filename = 'SCENE_' + String(scene.number).padStart(3, '0') + '_' + scene.totalSeconds + 's.mp4';
+            await chrome.runtime.sendMessage({
+                action: 'DOWNLOAD_VIDEO',
+                url: videoUrl,
+                filename,
+                folder: scene.folder
+            });
+            return { success: true };
+        } catch (e) {
+            console.error('[Extend] download erro:', e.message);
+            return { success: false, error: e.message };
+        }
     }
 })();

@@ -26,6 +26,10 @@ const tabState = {
         prompts: [], isRunning: false, timerInterval: null, countdownEndTime: null,
         statePollingTimer: null, detectedMedia: {}, folder: "LetzImagens",
         mediaIdMap: {}, outputCount: 1
+    },
+    extend: {
+        scenes: [], prompts: [], isRunning: false, folder: "LetzScenes",
+        useLite: true, currentSceneIdx: -1
     }
 };
 
@@ -98,6 +102,17 @@ const tabIds = {
         statSent: "imagesSent", statGenerated: "imagesGenerated", statFailed: "imagesFailed", statDownloaded: "imagesDownloaded",
         folder: "imageFolder", outputCount: "imageOutputCount",
         FolderReminder: "imageFolderReminder", blocked: "imageBlockedOverlay"
+    },
+    extend: {
+        promptsInput: "extendPromptsInput", settingsCard: "extendSettingsCard", inputSection: "extendInputSection",
+        promptListCard: "extendPromptListCard", promptItems: "extendPromptItems", promptCount: "extendPromptCount",
+        progressContainer: "extendProgressContainer", progressFill: "extendProgressFill", progressText: "extendProgressText",
+        timer: "extendTimer", processBtn: "extendProcessBtn", startBtn: "extendStartBtn", stopBtn: "extendStopBtn",
+        emergencyStopBtn: "extendEmergencyStopBtn", cancelAllBtn: "extendCancelAllBtn",
+        formatInfo: "extendFormatInfo", statusCard: "extendStatusCard",
+        statSent: "extendSent", statGenerated: "extendGenerated", statFailed: "extendFailed", statDownloaded: "extendDownloaded",
+        folder: "extendFolder", useLite: "extendUseLite",
+        FolderReminder: "extendFolderReminder", blocked: "extendBlockedOverlay"
     }
 };
 
@@ -181,7 +196,7 @@ function switchTab(tabName) {
 
 function updateBlockedOverlay() {
     const running = getRunningTab();
-    for (const tab of ["video", "frame", "image"]) {
+    for (const tab of ["video", "frame", "image", "extend"]) {
         const overlay = document.getElementById(tabIds[tab]?.blocked);
         if (overlay) {
             overlay.classList.toggle("hidden", !running || running === tab);
@@ -905,6 +920,7 @@ function getRunningTab() {
     if (tabState.video.isRunning) return "video";
     if (tabState.frame.isRunning) return "frame";
     if (tabState.image.isRunning) return "image";
+    if (tabState.extend.isRunning) return "extend";
     return null;
 }
 
@@ -2064,3 +2080,270 @@ async function showWaitingCounter(seconds, statusText, tab) {
 
     timer.classList.add("hidden");
 }
+
+// ============================================================
+// ESTENDER (SCENE/BASE/EXT) — v3.1.0
+// Modulo isolado: parser, UI, orquestracao via background.js
+// ============================================================
+function parseScenes(input) {
+    const scenes = [];
+    if (!input) return scenes;
+
+    // Split por linhas iniciando com SCENE N
+    const sceneRegex = /(?=^\s*SCENE\s+\d+)/im;
+    const blocks = input.split(sceneRegex).filter(b => b.trim());
+
+    for (const block of blocks) {
+        const headerMatch = block.match(/^\s*SCENE\s+(\d+)\s*(\[[\d,\s]*\])?\s*:?/i);
+        if (!headerMatch) continue;
+        const sceneNum = parseInt(headerMatch[1], 10);
+        const refsMatch = headerMatch[2];
+        const elements = refsMatch
+            ? refsMatch.replace(/[\[\]\s]/g, "").split(",").map(n => parseInt(n, 10)).filter(n => !isNaN(n))
+            : [];
+
+        // Encontrar BASE: e EXT: linhas
+        const lines = block.split(/\r?\n/);
+        let baseText = "";
+        const exts = [];
+        let mode = null;
+        let buffer = [];
+        const flush = () => {
+            if (mode === "BASE") baseText = buffer.join(" ").trim();
+            else if (mode === "EXT") exts.push(buffer.join(" ").trim());
+            buffer = [];
+        };
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (/^SCENE\s+\d+/i.test(line)) continue; // header
+            const baseHit = line.match(/^BASE\s*:\s*(.*)$/i);
+            const extHit = line.match(/^EXT\s*:\s*(.*)$/i);
+            if (baseHit) {
+                flush();
+                mode = "BASE";
+                if (baseHit[1]) buffer.push(baseHit[1]);
+            } else if (extHit) {
+                flush();
+                mode = "EXT";
+                if (extHit[1]) buffer.push(extHit[1]);
+            } else if (mode && line) {
+                buffer.push(line);
+            }
+        }
+        flush();
+
+        if (!baseText) continue;
+        const cleanExts = exts.filter(t => t).slice(0, 20);
+        scenes.push({
+            number: sceneNum,
+            elements,
+            base: baseText,
+            extensions: cleanExts,
+            status: "waiting",        // waiting|base_sent|base_generated|extending|done|failed
+            currentExtIdx: -1,
+            currentMediaId: null,
+            finalMediaId: null,
+            errorReason: null
+        });
+    }
+    scenes.sort((a, b) => a.number - b.number);
+    return scenes;
+}
+
+function processScenes() {
+    const tab = "extend";
+    const st = tabState[tab];
+    if (st.isRunning) {
+        updateStatus("warning", "Envio de cenas ja em andamento!");
+        return;
+    }
+    const inputEl = el(tab, "promptsInput");
+    const input = (inputEl?.value || "").trim();
+    if (!input) { updateStatus("error", "Cole as cenas primeiro!"); return; }
+
+    const scenes = parseScenes(input);
+    if (!scenes.length) { updateStatus("error", "Nenhuma SCENE encontrada!"); return; }
+
+    st.scenes = scenes;
+    saveSettings();
+    displayScenes();
+
+    el(tab, "inputSection").classList.add("hidden");
+    el(tab, "settingsCard").classList.add("hidden");
+    el(tab, "formatInfo")?.classList.add("hidden");
+    el(tab, "promptListCard").classList.remove("hidden");
+    el(tab, "processBtn").classList.add("hidden");
+    el(tab, "startBtn").classList.remove("hidden");
+    el(tab, "startBtn").textContent = "Iniciar Envio";
+    el(tab, "startBtn").onclick = () => startSendingScenes();
+    document.getElementById("sharedSettingsCard").classList.add("hidden");
+
+    const totalExt = scenes.reduce((s, sc) => s + sc.extensions.length, 0);
+    const totalSec = scenes.reduce((s, sc) => s + 8 + 7 * sc.extensions.length, 0);
+    updateStatus("success", scenes.length + " cenas | " + totalExt + " extensoes | " + totalSec + "s totais");
+}
+
+function displayScenes() {
+    const tab = "extend";
+    const container = el(tab, "promptItems");
+    const counter = el(tab, "promptCount");
+    const st = tabState[tab];
+    if (!container) return;
+    container.innerHTML = "";
+    const done = st.scenes.filter(s => s.status === "done" || s.status === "failed").length;
+    if (counter) counter.textContent = done + "/" + st.scenes.length;
+
+    for (const sc of st.scenes) {
+        const total = 8 + 7 * sc.extensions.length;
+        const item = document.createElement("div");
+        item.className = "prompt-item scene-item";
+        item.dataset.scene = sc.number;
+        const statusIcon = sc.status === "done" ? "OK"
+            : sc.status === "failed" ? "X"
+            : sc.status === "extending" ? ("EXT " + (sc.currentExtIdx + 1) + "/" + sc.extensions.length)
+            : sc.status === "base_generated" ? "BASE OK"
+            : sc.status === "base_sent" ? "BASE..."
+            : "...";
+        item.innerHTML =
+            '<div class="prompt-num">SCENE ' + sc.number + ' (' + total + 's)</div>' +
+            '<div class="prompt-text">' +
+                '<strong>BASE:</strong> ' + escapeHtml(sc.base.substring(0, 80)) +
+                (sc.extensions.length ? '<br><em>+' + sc.extensions.length + ' EXT</em>' : '') +
+            '</div>' +
+            '<div class="prompt-status">' + statusIcon + '</div>';
+        container.appendChild(item);
+    }
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+async function startSendingScenes() {
+    const tab = "extend";
+    const st = tabState[tab];
+    if (st.isRunning) return;
+    const running = getRunningTab();
+    if (running && running !== tab) {
+        updateStatus("error", "Outra aba esta rodando: " + running);
+        return;
+    }
+    st.isRunning = true;
+    st.useLite = !!document.getElementById("extendUseLite")?.checked;
+    el(tab, "startBtn").classList.add("hidden");
+    el(tab, "stopBtn").classList.remove("hidden");
+    updateBlockedOverlay();
+    updateStatus("running", "Iniciando envio de cenas...");
+
+    try {
+        await chrome.runtime.sendMessage({
+            action: "EXTEND_START_QUEUE",
+            scenes: st.scenes.map(s => ({
+                number: s.number,
+                elements: s.elements,
+                base: s.base,
+                extensions: s.extensions
+            })),
+            folder: tabState.extend.folder || "LetzScenes",
+            useLite: st.useLite
+        });
+    } catch (e) {
+        console.error("[Panel] EXTEND_START_QUEUE erro:", e);
+        st.isRunning = false;
+        el(tab, "stopBtn").classList.add("hidden");
+        el(tab, "startBtn").classList.remove("hidden");
+        updateStatus("error", "Erro ao iniciar: " + e.message);
+        updateBlockedOverlay();
+    }
+}
+
+async function stopSendingScenes() {
+    const tab = "extend";
+    try {
+        await chrome.runtime.sendMessage({ action: "EXTEND_STOP_QUEUE" });
+    } catch (e) {}
+    tabState[tab].isRunning = false;
+    el(tab, "stopBtn").classList.add("hidden");
+    el(tab, "startBtn").classList.remove("hidden");
+    updateBlockedOverlay();
+    updateStatus("warning", "Envio de cenas parado");
+}
+
+function handleSceneUpdate(data) {
+    if (!data || typeof data.number !== "number") return;
+    const st = tabState.extend;
+    const sc = st.scenes.find(s => s.number === data.number);
+    if (!sc) return;
+    if (data.status) sc.status = data.status;
+    if (data.currentExtIdx !== undefined) sc.currentExtIdx = data.currentExtIdx;
+    if (data.currentMediaId) sc.currentMediaId = data.currentMediaId;
+    if (data.finalMediaId) sc.finalMediaId = data.finalMediaId;
+    if (data.errorReason) sc.errorReason = data.errorReason;
+    displayScenes();
+    updateExtendStats();
+}
+
+function handleSceneQueueComplete() {
+    const st = tabState.extend;
+    st.isRunning = false;
+    el("extend", "stopBtn").classList.add("hidden");
+    el("extend", "startBtn").classList.remove("hidden");
+    updateBlockedOverlay();
+    const done = st.scenes.filter(s => s.status === "done").length;
+    const failed = st.scenes.filter(s => s.status === "failed").length;
+    updateStatus("success", "Cenas concluidas: " + done + " OK, " + failed + " falhas");
+}
+
+function updateExtendStats() {
+    const st = tabState.extend;
+    const sent = st.scenes.filter(s => s.status !== "waiting").length;
+    const ok = st.scenes.filter(s => s.status === "done").length;
+    const fail = st.scenes.filter(s => s.status === "failed").length;
+    const dl = st.scenes.filter(s => s.finalMediaId).length;
+    const setText = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    setText("extendSent", sent);
+    setText("extendGenerated", ok);
+    setText("extendFailed", fail);
+    setText("extendDownloaded", dl);
+    const card = document.getElementById("extendStatusCard");
+    if (card && sent > 0) card.classList.remove("hidden");
+}
+
+// Wire Estender event listeners (executado apos DOM pronto + initApp)
+function wireExtendTab() {
+    const processBtn = document.getElementById("extendProcessBtn");
+    const stopBtn = document.getElementById("extendStopBtn");
+    const folderInput = document.getElementById("extendFolder");
+    const useLite = document.getElementById("extendUseLite");
+    const cancelBtn = document.getElementById("extendCancelAllBtn");
+
+    if (processBtn) processBtn.addEventListener("click", () => processScenes());
+    if (stopBtn) stopBtn.addEventListener("click", () => stopSendingScenes());
+    if (cancelBtn) cancelBtn.addEventListener("click", () => stopSendingScenes());
+    if (folderInput) {
+        folderInput.addEventListener("change", (e) => {
+            tabState.extend.folder = e.target.value.trim() || "LetzScenes";
+            saveSettings();
+        });
+    }
+    if (useLite) {
+        useLite.addEventListener("change", (e) => {
+            tabState.extend.useLite = !!e.target.checked;
+            saveSettings();
+        });
+    }
+}
+
+// Hook na inicializacao do app + ouvir mensagens scene-update
+(function setupExtendHooks() {
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", () => setTimeout(wireExtendTab, 0));
+    } else {
+        setTimeout(wireExtendTab, 0);
+    }
+    window.addEventListener("message", (e) => {
+        const msg = e.data || {};
+        if (msg.type === "SCENE_UPDATE") handleSceneUpdate(msg.data);
+        else if (msg.type === "SCENE_QUEUE_COMPLETE") handleSceneQueueComplete();
+    });
+})();

@@ -1817,7 +1817,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                 case "VIDEO_STATUS_UPDATE": {
                     const { updates } = message;
-                    // Just acknowledge - panel.js handles the actual state updates
+                    // v3.1.0 EXTEND: encaminhar updates p/ scene queue
+                    try { extendOnVideoStatus(updates); } catch (e) { console.log("[Extend] status hook err:", e.message); }
                     sendResponse({ success: true });
                     break;
                 }
@@ -1970,6 +1971,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     sendResponse({ success: true, selectors: {} });
                     break;
 
+                // v3.1.0 EXTEND: enfileirar cenas
+                case "EXTEND_START_QUEUE":
+                    sendResponse(await extendStartQueue(message.scenes, message.folder, message.useLite));
+                    break;
+
+                case "EXTEND_STOP_QUEUE":
+                    extendStopQueue();
+                    sendResponse({ success: true });
+                    break;
+
+                // v3.1.0 EXTEND: handlers vindos do content.js
+                case "EXTEND_BASE_SUBMITTED":
+                    extendOnBaseSubmitted(message.sceneNumber, message.mediaId);
+                    sendResponse({ success: true });
+                    break;
+
+                case "EXTEND_EXT_SUBMITTED":
+                    extendOnExtSubmitted(message.sceneNumber, message.mediaId);
+                    sendResponse({ success: true });
+                    break;
+
+                case "EXTEND_STEP_FAILED":
+                    extendOnStepFailed(message.sceneNumber, message.reason);
+                    sendResponse({ success: true });
+                    break;
+
                 default:
                     sendResponse({ error: "Unknown action" });
             }
@@ -2029,3 +2056,207 @@ const _bootPromise = (async () => {
     await loadQueueState();
     console.log("[Dotti] Boot complete. Queue:", promptQueue.length, "Processing:", isProcessingQueue);
 })();
+
+// ============================================================
+// EXTEND (SCENE) QUEUE — v3.1.0
+// Orquestra: BASE -> aguarda COMPLETED -> EXT*N (cada um aguarda COMPLETED) -> download final.
+// ============================================================
+let _extendQueue = null; // { scenes:[...], folder, useLite, currentIdx, stopped }
+let _extendActiveTimeout = null;
+
+function _notifyPanelExtend(message) {
+    if (!targetTabId) return;
+    try { chrome.tabs.sendMessage(targetTabId, message).catch(() => {}); } catch (e) {}
+}
+
+function _sceneUpdate(scene, patch) {
+    Object.assign(scene, patch);
+    _notifyPanelExtend({ action: "SCENE_UPDATE_BRIDGE", data: { number: scene.number, ...patch } });
+}
+
+async function extendStartQueue(scenes, folder, useLite) {
+    if (_extendQueue && !_extendQueue.stopped) {
+        return { success: false, error: "queue_active" };
+    }
+    if (!Array.isArray(scenes) || scenes.length === 0) {
+        return { success: false, error: "no_scenes" };
+    }
+    _extendQueue = {
+        scenes: scenes.map(s => ({
+            number: s.number,
+            elements: s.elements || [],
+            base: s.base,
+            extensions: s.extensions || [],
+            status: "waiting",
+            currentExtIdx: -1,
+            currentMediaId: null,
+            finalMediaId: null
+        })),
+        folder: folder || "LetzScenes",
+        useLite: useLite !== false,
+        currentIdx: -1,
+        stopped: false
+    };
+    console.log("[Extend] startQueue:", _extendQueue.scenes.length, "cenas | folder=" + _extendQueue.folder + " | lite=" + _extendQueue.useLite);
+    setTimeout(() => extendNextScene(), 100);
+    return { success: true };
+}
+
+function extendStopQueue() {
+    if (!_extendQueue) return;
+    _extendQueue.stopped = true;
+    if (_extendActiveTimeout) { clearTimeout(_extendActiveTimeout); _extendActiveTimeout = null; }
+    _notifyPanelExtend({ action: "SCENE_QUEUE_COMPLETE_BRIDGE" });
+    console.log("[Extend] queue parada");
+}
+
+async function extendNextScene() {
+    if (!_extendQueue || _extendQueue.stopped) return;
+    _extendQueue.currentIdx++;
+    if (_extendQueue.currentIdx >= _extendQueue.scenes.length) {
+        console.log("[Extend] todas as cenas concluidas");
+        _notifyPanelExtend({ action: "SCENE_QUEUE_COMPLETE_BRIDGE" });
+        _extendQueue = null;
+        return;
+    }
+    const scene = _extendQueue.scenes[_extendQueue.currentIdx];
+    console.log("[Extend] iniciando SCENE", scene.number);
+    _sceneUpdate(scene, { status: "base_sent" });
+
+    // Pedir ao content.js para enviar o BASE
+    try {
+        await chrome.tabs.sendMessage(targetTabId, {
+            action: "EXTEND_RUN_BASE",
+            scene: { number: scene.number, elements: scene.elements, text: scene.base }
+        });
+    } catch (e) {
+        console.error("[Extend] EXTEND_RUN_BASE erro:", e.message);
+        _sceneUpdate(scene, { status: "failed", errorReason: "base_dispatch_error" });
+        setTimeout(() => extendNextScene(), 1000);
+        return;
+    }
+
+    // Timeout de seguranca: 6min para BASE chegar a COMPLETED
+    _extendActiveTimeout = setTimeout(() => {
+        if (scene.status === "base_sent") {
+            console.warn("[Extend] BASE timeout SCENE", scene.number);
+            _sceneUpdate(scene, { status: "failed", errorReason: "base_timeout" });
+            setTimeout(() => extendNextScene(), 1000);
+        }
+    }, 6 * 60 * 1000);
+}
+
+function extendOnBaseSubmitted(sceneNumber, mediaId) {
+    if (!_extendQueue) return;
+    const scene = _extendQueue.scenes.find(s => s.number === sceneNumber);
+    if (!scene) return;
+    console.log("[Extend] BASE submitted SCENE", sceneNumber, "mediaId=" + (mediaId || "?").substring(0, 12));
+    _sceneUpdate(scene, { currentMediaId: mediaId || null });
+}
+
+function extendOnExtSubmitted(sceneNumber, mediaId) {
+    if (!_extendQueue) return;
+    const scene = _extendQueue.scenes.find(s => s.number === sceneNumber);
+    if (!scene) return;
+    console.log("[Extend] EXT submitted SCENE", sceneNumber, "idx=" + scene.currentExtIdx, "mediaId=" + (mediaId || "?").substring(0, 12));
+    _sceneUpdate(scene, { currentMediaId: mediaId || null });
+}
+
+function extendOnStepFailed(sceneNumber, reason) {
+    if (!_extendQueue) return;
+    const scene = _extendQueue.scenes.find(s => s.number === sceneNumber);
+    if (!scene) return;
+    console.warn("[Extend] step failed SCENE", sceneNumber, "reason=" + reason);
+    _sceneUpdate(scene, { status: "failed", errorReason: reason || "unknown" });
+    if (_extendActiveTimeout) { clearTimeout(_extendActiveTimeout); _extendActiveTimeout = null; }
+    setTimeout(() => extendNextScene(), 1000);
+}
+
+// Recebe updates do interceptor (via VIDEO_STATUS_UPDATE) e avanca a maquina de estados
+function extendOnVideoStatus(updates) {
+    if (!_extendQueue || _extendQueue.stopped) return;
+    if (!Array.isArray(updates)) return;
+    const scene = _extendQueue.scenes[_extendQueue.currentIdx];
+    if (!scene || !scene.currentMediaId) return;
+
+    for (const u of updates) {
+        if (!u || !u.mediaId) continue;
+        if (u.mediaId !== scene.currentMediaId) continue;
+
+        if (u.status === "COMPLETED") {
+            if (_extendActiveTimeout) { clearTimeout(_extendActiveTimeout); _extendActiveTimeout = null; }
+            if (scene.status === "base_sent") {
+                _sceneUpdate(scene, { status: "base_generated" });
+                _advanceExtension(scene);
+            } else if (scene.status === "extending") {
+                // EXT atual concluida
+                if (scene.currentExtIdx + 1 >= scene.extensions.length) {
+                    // ultima extensao -> finalizar
+                    _finalizeScene(scene);
+                } else {
+                    _advanceExtension(scene);
+                }
+            }
+        } else if (u.status === "FAILED") {
+            if (_extendActiveTimeout) { clearTimeout(_extendActiveTimeout); _extendActiveTimeout = null; }
+            _sceneUpdate(scene, { status: "failed", errorReason: "media_failed" });
+            setTimeout(() => extendNextScene(), 1000);
+        }
+    }
+}
+
+async function _advanceExtension(scene) {
+    if (!_extendQueue || _extendQueue.stopped) return;
+    if (!scene.extensions.length) {
+        // Sem extensoes -> finalizar com a base
+        _finalizeScene(scene);
+        return;
+    }
+    scene.currentExtIdx++;
+    const extText = scene.extensions[scene.currentExtIdx];
+    _sceneUpdate(scene, { status: "extending", currentExtIdx: scene.currentExtIdx });
+    try {
+        await chrome.tabs.sendMessage(targetTabId, {
+            action: "EXTEND_RUN_EXT",
+            scene: {
+                number: scene.number,
+                extIdx: scene.currentExtIdx,
+                text: extText,
+                useLite: _extendQueue.useLite,
+                isFirstExt: scene.currentExtIdx === 0,
+                baseMediaId: scene.currentMediaId
+            }
+        });
+    } catch (e) {
+        console.error("[Extend] EXTEND_RUN_EXT erro:", e.message);
+        _sceneUpdate(scene, { status: "failed", errorReason: "ext_dispatch_error" });
+        setTimeout(() => extendNextScene(), 1000);
+        return;
+    }
+    _extendActiveTimeout = setTimeout(() => {
+        if (scene.status === "extending") {
+            console.warn("[Extend] EXT timeout SCENE", scene.number);
+            _sceneUpdate(scene, { status: "failed", errorReason: "ext_timeout" });
+            setTimeout(() => extendNextScene(), 1000);
+        }
+    }, 6 * 60 * 1000);
+}
+
+async function _finalizeScene(scene) {
+    _sceneUpdate(scene, { status: "done", finalMediaId: scene.currentMediaId });
+    // Pedir ao content.js para baixar o final
+    try {
+        await chrome.tabs.sendMessage(targetTabId, {
+            action: "EXTEND_DOWNLOAD",
+            scene: {
+                number: scene.number,
+                mediaId: scene.currentMediaId,
+                folder: _extendQueue.folder,
+                totalSeconds: 8 + 7 * scene.extensions.length
+            }
+        });
+    } catch (e) {
+        console.error("[Extend] EXTEND_DOWNLOAD erro:", e.message);
+    }
+    setTimeout(() => extendNextScene(), 2000);
+}
