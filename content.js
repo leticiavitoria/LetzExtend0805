@@ -4658,70 +4658,171 @@
     }
 
     function _findEstenderButton() {
-        // Botao na barra inferior do detalhe do video
-        const btns = Array.from(document.querySelectorAll('button'));
-        for (const b of btns) {
+        // Botao na barra inferior do detalhe: texto "Estender" / "Extend"
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+        for (const b of candidates) {
             if (b.offsetParent === null) continue;
             const t = (b.textContent || '').toLowerCase().trim();
-            if (t === 'estender' || t.startsWith('estender') || t.includes('extend')) return b;
+            // Igual ou comeca com "estender"/"extend" (sem confundir com extender de menu)
+            if (/^(>+\s*)?estender\b/.test(t) || /^(>+\s*)?extend\b/.test(t)) return b;
         }
         return null;
     }
 
     function _findModelDropdownTrigger() {
-        // Botao com texto "Veo 3.1 - ..." (na barra do submit)
-        const btns = Array.from(document.querySelectorAll('button'));
-        for (const b of btns) {
+        // Procura o trigger do dropdown de modelo: texto "Veo 3.1 ...", preferindo
+        // o que estiver perto do textbox (mesma row do submit).
+        const tb = document.querySelector('[role="textbox"]');
+        const tbRect = tb ? tb.getBoundingClientRect() : null;
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
+        const matches = [];
+        for (const b of candidates) {
             if (b.offsetParent === null) continue;
             const t = (b.textContent || '').trim();
-            if (/^Veo\s*3\.1\b/i.test(t)) return b;
+            if (/Veo\s*3\.1\b/i.test(t) && t.length < 80) {
+                let dist = 99999;
+                if (tbRect) {
+                    const r = b.getBoundingClientRect();
+                    dist = Math.abs(r.top - tbRect.top) + Math.abs(r.left - tbRect.left);
+                }
+                matches.push({ el: b, dist, text: t });
+            }
         }
-        return null;
+        if (!matches.length) return null;
+        matches.sort((a, b) => a.dist - b.dist);
+        console.log('[Extend] modelDropdownTrigger candidates:', matches.map(m => m.text).slice(0, 3));
+        return matches[0].el;
     }
 
     function _findLowerPriorityOption() {
-        // Item do dropdown com texto "Veo 3.1 - Lite [Lower Priority]"
-        // Pode ser <li>, <button>, <div role="menuitem">, etc.
-        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div'];
+        // Procura o item do dropdown "Veo 3.1 - Lite [Lower Priority]"
+        // Aceita variacoes de espacamento/colchete.
+        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div[tabindex]', 'div[role]'];
+        const seen = new Set();
         for (const sel of sels) {
             const nodes = Array.from(document.querySelectorAll(sel));
             for (const n of nodes) {
+                if (seen.has(n)) continue;
+                seen.add(n);
                 if (n.offsetParent === null) continue;
                 const t = (n.textContent || '').trim();
-                if (/Veo\s*3\.1\s*-?\s*Lite\s*\[?\s*Lower\s*Priority/i.test(t)) {
-                    // Garantir que nao e a opcao "Fast [Lower Priority]"
-                    if (/Fast/i.test(t)) continue;
-                    return n;
-                }
+                if (t.length > 120) continue;
+                if (!/Lower\s*Priority/i.test(t)) continue;
+                if (!/Lite/i.test(t)) continue;
+                if (/Fast/i.test(t)) continue;
+                console.log('[Extend] lowerPriorityOption MATCH:', t);
+                return n;
             }
         }
         return null;
+    }
+
+    function _isLowerPrioritySelected() {
+        const trigger = _findModelDropdownTrigger();
+        if (!trigger) return false;
+        const t = (trigger.textContent || '').trim();
+        return /Lower\s*Priority/i.test(t) && /Lite/i.test(t) && !/Fast/i.test(t);
     }
 
     function _findTextareaForExtend() {
-        // Slate textbox visivel com placeholder "Qual e a proxima etapa?"
+        // Slate textbox visivel; preferir o que tem placeholder "Qual e a proxima etapa"
         const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
         for (const t of tbs) {
             if (t.offsetParent === null) continue;
-            return t;
+            const ph = (t.getAttribute('aria-placeholder') || t.getAttribute('data-placeholder') || '').toLowerCase();
+            if (ph.includes('proxima etapa') || ph.includes('próxima etapa') || ph.includes('next step')) return t;
+        }
+        for (const t of tbs) {
+            if (t.offsetParent !== null) return t;
         }
         return null;
     }
 
-    function _findSidebarThumbByMediaId(mediaId) {
+    function _findThumbByMediaId(mediaId) {
         if (!mediaId) return null;
-        // Tenta achar img/video/elemento com src ou data-* contendo o mediaId (fragmento)
         const frag = mediaId.split('/').pop().split(':').pop();
-        const candidates = Array.from(document.querySelectorAll('img, video, [data-media-id], [data-id]'));
+        if (!frag) return null;
+        // 1) <video> ou <img> cujo src contenha o fragmento
+        const candidates = Array.from(document.querySelectorAll('video, img, source, [data-media-id], [data-id], [data-name]'));
         for (const c of candidates) {
-            const src = c.src || c.getAttribute('data-media-id') || c.getAttribute('data-id') || '';
+            const src = c.src || c.getAttribute('src') || c.getAttribute('data-media-id') || c.getAttribute('data-id') || c.getAttribute('data-name') || '';
             if (src && src.includes(frag)) {
-                // subir ate um clicavel
-                let parent = c.closest('button, a, [role="button"], [role="listitem"]') || c.parentElement;
-                return parent || c;
+                const clickable = c.closest('button, a, [role="button"], [role="listitem"], [data-testid]') || c.parentElement || c;
+                console.log('[Extend] thumb encontrado por mediaId frag=' + frag.substring(0, 10));
+                return clickable;
             }
         }
         return null;
+    }
+
+    function _findMostRecentVideoThumb() {
+        // Fallback: pega o thumb de video mais recente (ultimo no DOM, em geral o ultimo gerado)
+        const videos = Array.from(document.querySelectorAll('video')).filter(v => v.offsetParent !== null);
+        if (videos.length) {
+            const v = videos[videos.length - 1];
+            const clickable = v.closest('button, a, [role="button"], [role="listitem"], [data-testid]') || v.parentElement || v;
+            console.log('[Extend] fallback: ultimo thumb de video');
+            return clickable;
+        }
+        // Sem <video>, tenta cards com poster image em layout de grid
+        const imgs = Array.from(document.querySelectorAll('img')).filter(i =>
+            i.offsetParent !== null && i.naturalWidth > 100 && i.closest('[role="button"], button, a, [data-testid]'));
+        if (imgs.length) {
+            const im = imgs[imgs.length - 1];
+            return im.closest('[role="button"], button, a, [data-testid]');
+        }
+        return null;
+    }
+
+    async function _openDetailForMediaId(mediaId) {
+        // Ja em detalhe?
+        if (_findEstenderButton()) return true;
+        // 1) Tentar achar thumb pelo mediaId
+        let target = _findThumbByMediaId(mediaId);
+        // 2) Fallback: thumb mais recente
+        if (!target) target = _findMostRecentVideoThumb();
+        if (!target) {
+            console.warn('[Extend] nenhum thumb encontrado para abrir detalhe');
+            return false;
+        }
+        await _trustedClickEl(target);
+        // Aguardar transicao para detalhe (Estender button aparecer)
+        const ok = await _waitForElement(_findEstenderButton, 6000);
+        return !!ok;
+    }
+
+    async function _selectLowerPriorityModel(maxRetries) {
+        if (_isLowerPrioritySelected()) {
+            console.log('[Extend] Lower Priority ja selecionado');
+            return true;
+        }
+        const tries = maxRetries || 2;
+        for (let attempt = 1; attempt <= tries; attempt++) {
+            const trigger = await _waitForElement(_findModelDropdownTrigger, 4000);
+            if (!trigger) {
+                console.warn('[Extend] dropdown trigger nao encontrado (tent ' + attempt + ')');
+                await sleep(500);
+                continue;
+            }
+            await _trustedClickEl(trigger);
+            await sleep(500);
+            const opt = await _waitForElement(_findLowerPriorityOption, 4000);
+            if (!opt) {
+                console.warn('[Extend] opcao Lower Priority nao encontrada (tent ' + attempt + ')');
+                // Fechar dropdown com Esc
+                document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                await sleep(300);
+                continue;
+            }
+            await _trustedClickEl(opt);
+            await sleep(600);
+            if (_isLowerPrioritySelected()) {
+                console.log('[Extend] Lower Priority selecionado com sucesso');
+                return true;
+            }
+            console.warn('[Extend] selecao nao confirmada (tent ' + attempt + ')');
+        }
+        return false;
     }
 
     async function runExtendBase(scene) {
@@ -4770,49 +4871,35 @@
     }
 
     async function runExtendExt(scene) {
-        console.log('[Extend] runExtendExt SCENE', scene.number, 'idx', scene.extIdx);
+        console.log('[Extend] runExtendExt SCENE', scene.number, 'idx', scene.extIdx, 'isFirstExt=' + scene.isFirstExt);
         _installExtendInterceptListener();
         try {
-            // 1) Garantir que o detalhe do video correto esta aberto
-            const inDetail = !!_findEstenderButton();
-            if (!inDetail) {
-                // Clicar no thumb do mediaId atual no grid
-                const thumb = _findSidebarThumbByMediaId(scene.baseMediaId);
-                if (!thumb) throw new Error('thumb_not_found');
-                await _trustedClickEl(thumb);
-                await sleep(1200);
-            }
+            // 1) Abrir detalhe do video alvo (multiplas estrategias)
+            const opened = await _openDetailForMediaId(scene.baseMediaId);
+            if (!opened) throw new Error('detail_view_not_opened');
+            await sleep(800); // DOM acomodar
 
-            // 2) Clicar no botao "Estender"
+            // 2) Clicar no botao "Estender" para entrar em modo extensao
             const estenderBtn = await _waitForElement(_findEstenderButton, 6000);
             if (!estenderBtn) throw new Error('estender_btn_not_found');
             await _trustedClickEl(estenderBtn);
-            await sleep(600);
+            await sleep(700);
 
-            // 3) Selecionar modelo Lower Priority (so na 1a EXT da cena)
-            if (scene.useLite && scene.isFirstExt) {
-                const trigger = await _waitForElement(_findModelDropdownTrigger, 4000);
-                if (trigger) {
-                    await _trustedClickEl(trigger);
-                    await sleep(400);
-                    const opt = await _waitForElement(_findLowerPriorityOption, 4000);
-                    if (opt) {
-                        await _trustedClickEl(opt);
-                        await sleep(300);
-                    } else {
-                        console.warn('[Extend] opcao Lower Priority nao encontrada — seguindo com modelo atual');
-                    }
-                } else {
-                    console.warn('[Extend] dropdown de modelo nao encontrado — seguindo com modelo atual');
+            // 3) Sempre garantir Lower Priority selecionado (mais robusto que so na 1a EXT)
+            if (scene.useLite) {
+                const ok = await _selectLowerPriorityModel(2);
+                if (!ok) {
+                    console.warn('[Extend] FALHA ao selecionar Lower Priority — abortando para nao gastar creditos');
+                    throw new Error('lower_priority_not_selected');
                 }
             }
 
-            // 4) Preencher textarea com texto da extensao
+            // 4) Preencher textarea de extensao
             const ta = await _waitForElement(_findTextareaForExtend, 4000);
             if (!ta) throw new Error('textarea_not_found');
             const filled = await fillTextarea(scene.text);
             if (!filled) throw new Error('fill_textarea_failed');
-            await sleep(200);
+            await sleep(300);
 
             // 5) Marcar pending e submeter
             _extendPending = { sceneNumber: scene.number, kind: 'ext' };
