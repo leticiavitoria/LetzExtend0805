@@ -5010,10 +5010,57 @@
         }
     }
 
+    function _findFlowDownloadButton() {
+        // O Flow tem um botao de download no header do detalhe (icone download
+        // ao lado de favorito/compartilhar). Procurar:
+        // 1) aria-label contendo "baixar"/"download"
+        // 2) <button> contendo material icon "download"/"file_download"/"arrow_downward"
+        // Restrito ao header (top<150px) para nao casar com botoes do sidebar.
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"], a'))
+            .filter(_isVisible);
+        for (const b of buttons) {
+            const r = b.getBoundingClientRect();
+            if (r.top > 150) continue; // so header
+            const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
+            if (/baixar|download/.test(aria)) return b;
+            // material icon dentro
+            const inner = (b.innerText || b.textContent || '').toLowerCase().trim();
+            if (inner === 'download' || inner === 'file_download' || inner === 'arrow_downward') return b;
+            // icone material como <i> ou <span>
+            const icons = b.querySelectorAll('i, span');
+            for (const ic of icons) {
+                const t = (ic.textContent || '').trim().toLowerCase();
+                if (t === 'download' || t === 'file_download' || t === 'arrow_downward') return b;
+            }
+        }
+        return null;
+    }
+
     async function runExtendDownload(scene) {
         console.log('[Extend] runExtendDownload SCENE', scene.number, 'mediaId=' + (scene.mediaId || '?').substring(0, 12));
         try {
-            // Tenta achar a URL do video com base no mediaId
+            // Estrategia preferida: clicar no botao de download nativo do Flow.
+            // Ele baixa o video completo (concatenado) — cada EXT individual no DOM
+            // e apenas o segmento de +7s, nao a cena completa.
+            const dlBtn = _findFlowDownloadButton();
+            if (dlBtn) {
+                console.log('[Extend] botao download nativo encontrado — preparando intercept');
+                // Avisar background para interceptar o proximo download e renomear
+                await chrome.runtime.sendMessage({
+                    action: 'EXTEND_EXPECT_NATIVE_DOWNLOAD',
+                    sceneNumber: scene.number,
+                    folder: scene.folder,
+                    totalSeconds: scene.totalSeconds
+                });
+                await _trustedClickEl(dlBtn);
+                // Aguardar download comecar (browser fire onDeterminingFilename)
+                await sleep(2500);
+                await _ensureProjectHome();
+                return { success: true };
+            }
+
+            // Fallback legado: tentar baixar via URL do <video>
+            console.warn('[Extend] botao download nativo nao encontrado — fallback URL');
             const frag = (scene.mediaId || '').split('/').pop().split(':').pop();
             let videoUrl = null;
             const videos = Array.from(document.querySelectorAll('video'));
@@ -5031,7 +5078,6 @@
                 filename,
                 folder: scene.folder
             });
-            // Volta para a home do projeto para a proxima cena comecar limpa
             await sleep(800);
             await _ensureProjectHome();
             return { success: true };
