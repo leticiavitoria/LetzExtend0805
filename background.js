@@ -2215,6 +2215,8 @@ async function _advanceExtension(scene) {
     scene.currentExtIdx++;
     const extText = scene.extensions[scene.currentExtIdx];
     _sceneUpdate(scene, { status: "extending", currentExtIdx: scene.currentExtIdx });
+    // Delay para Flow renderizar o thumb recem gerado / detalhe ficar acessivel
+    await new Promise(r => setTimeout(r, scene.currentExtIdx === 0 ? 3500 : 1500));
     try {
         await chrome.tabs.sendMessage(targetTabId, {
             action: "EXTEND_RUN_EXT",
