@@ -1997,6 +1997,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     sendResponse({ success: true });
                     break;
 
+                case "EXTEND_EXPECT_NATIVE_DOWNLOAD":
+                    _extendPendingDownload = {
+                        sceneNumber: message.sceneNumber,
+                        folder: message.folder || 'LetzScenes',
+                        totalSeconds: message.totalSeconds,
+                        startedAt: Date.now()
+                    };
+                    console.log('[Extend] aguardando download nativo SCENE', message.sceneNumber);
+                    sendResponse({ success: true });
+                    break;
+
                 default:
                     sendResponse({ error: "Unknown action" });
             }
@@ -2261,4 +2272,33 @@ async function _finalizeScene(scene) {
         console.error("[Extend] EXTEND_DOWNLOAD erro:", e.message);
     }
     setTimeout(() => extendNextScene(), 2000);
+}
+
+// ============================================================
+// EXTEND — intercept de download nativo do Flow
+// Quando o content.js clica no botao "Baixar" do Flow, esta funcao
+// renomeia o arquivo conforme nossa convencao SCENE_NNN_{Xs}.mp4
+// dentro da pasta configurada.
+// ============================================================
+let _extendPendingDownload = null; // {sceneNumber, folder, totalSeconds, startedAt}
+
+if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
+    chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+        try {
+            if (!_extendPendingDownload) return;
+            if (Date.now() - _extendPendingDownload.startedAt > 30000) {
+                _extendPendingDownload = null;
+                return;
+            }
+            const ext = ((item.filename || '').match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
+            const newName = (_extendPendingDownload.folder || 'LetzScenes') + '/' +
+                'SCENE_' + String(_extendPendingDownload.sceneNumber).padStart(3, '0') +
+                '_' + _extendPendingDownload.totalSeconds + 's.' + ext;
+            console.log('[Extend] renomeando download:', item.filename, '->', newName);
+            suggest({ filename: newName, conflictAction: 'uniquify' });
+            _extendPendingDownload = null;
+        } catch (e) {
+            console.error('[Extend] onDeterminingFilename erro:', e.message);
+        }
+    });
 }
