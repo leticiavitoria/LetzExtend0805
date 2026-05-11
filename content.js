@@ -4851,6 +4851,22 @@
         return false;
     }
 
+    // Submete e usa o evento dotti-video-submitted (via _extendPending) como prova.
+    // clickCreateButton tem verificacao visual (textarea limpa) que NAO funciona em
+    // extend mode — Flow mantem o texto/state diferente. A API e a fonte de verdade.
+    async function _submitAndAwaitApi(sceneNumber, kind, timeoutMs) {
+        _extendPending = { sceneNumber, kind };
+        // Dispara o submit. Ignoramos o retorno: a verificacao real e pelo evento da API.
+        try { await clickCreateButton(); } catch (_) {}
+        const deadline = Date.now() + (timeoutMs || 10000);
+        while (Date.now() < deadline) {
+            if (_extendPending === null) return true; // API listener consumiu = submit OK
+            await sleep(150);
+        }
+        _extendPending = null;
+        return false;
+    }
+
     async function runExtendBase(scene) {
         console.log('[Extend] runExtendBase SCENE', scene.number);
         _installExtendInterceptListener();
@@ -4869,14 +4885,10 @@
             const filled = await fillTextarea(scene.text);
             if (!filled) throw new Error('fill_textarea_failed');
 
-            // Marcar pending ANTES do submit
-            _extendPending = { sceneNumber: scene.number, kind: 'base' };
-
-            // Submit
-            const ok = await clickCreateButton();
+            // Submit + aguarda confirmacao da API (em vez de checagem visual frageil)
+            const ok = await _submitAndAwaitApi(scene.number, 'base', 12000);
             if (!ok) {
-                _extendPending = null;
-                chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: 'submit_failed' }).catch(() => {});
+                chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: 'submit_failed_no_api' }).catch(() => {});
                 return { success: false };
             }
             return { success: true };
@@ -4986,13 +4998,9 @@
             if (!filled) throw new Error('fill_textarea_failed');
             await sleep(300);
 
-            // 6) Marcar pending e submeter
-            _extendPending = { sceneNumber: scene.number, kind: 'ext' };
-            const ok = await clickCreateButton();
-            if (!ok) {
-                _extendPending = null;
-                throw new Error('submit_failed');
-            }
+            // 6) Submit + aguarda confirmacao da API (fonte de verdade)
+            const ok = await _submitAndAwaitApi(scene.number, 'ext', 12000);
+            if (!ok) throw new Error('submit_failed_no_api');
             return { success: true };
         } catch (e) {
             console.error('[Extend] runExtendExt erro:', e.message);
