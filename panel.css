@@ -772,6 +772,16 @@ textarea::placeholder { color: var(--text-muted); }
     color: var(--text-muted);
     line-height: 1.4;
 }
+.scene-item .scene-base,
+.scene-item .scene-ext {
+    margin: 2px 0;
+    padding: 4px 6px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.02);
+    border-left: 2px solid rgba(255,255,255,0.1);
+}
+.scene-item .scene-base { border-left-color: var(--orange); }
+.scene-item .scene-ext  { border-left-color: #4aa; }
 .scene-item .prompt-status {
     font-size: 11px;
     color: var(--text-muted);

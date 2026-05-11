@@ -2089,57 +2089,77 @@ function parseScenes(input) {
     const scenes = [];
     if (!input) return scenes;
 
-    // Split por linhas iniciando com SCENE N
-    const sceneRegex = /(?=^\s*SCENE\s+\d+)/im;
-    const blocks = input.split(sceneRegex).filter(b => b.trim());
+    // Normalizar: BOM, line endings, nbsp
+    let txt = input.replace(/^﻿/, '').replace(/\r\n?/g, '\n').replace(/ /g, ' ');
 
-    for (const block of blocks) {
-        const headerMatch = block.match(/^\s*SCENE\s+(\d+)\s*(\[[\d,\s]*\])?\s*:?/i);
-        if (!headerMatch) continue;
-        const sceneNum = parseInt(headerMatch[1], 10);
-        const refsMatch = headerMatch[2];
-        const elements = refsMatch
-            ? refsMatch.replace(/[\[\]\s]/g, "").split(",").map(n => parseInt(n, 10)).filter(n => !isNaN(n))
+    // Localizar todos os marcadores SCENE N
+    const headerRe = /^[ \t]*SCENE[ \t]+(\d+)[ \t]*(\[[\d,\s]*\])?[ \t]*:?[ \t]*$/gim;
+    const markers = [];
+    let m;
+    while ((m = headerRe.exec(txt)) !== null) {
+        markers.push({ pos: m.index, length: m[0].length, num: parseInt(m[1], 10), refs: m[2] });
+    }
+    console.log('[Parser] SCENE headers encontrados:', markers.length);
+    if (!markers.length) return scenes;
+
+    for (let i = 0; i < markers.length; i++) {
+        const start = markers[i].pos + markers[i].length;
+        const end = (i + 1 < markers.length) ? markers[i + 1].pos : txt.length;
+        const body = txt.substring(start, end);
+        const elements = markers[i].refs
+            ? markers[i].refs.replace(/[\[\]\s]/g, "").split(",").map(n => parseInt(n, 10)).filter(n => !isNaN(n))
             : [];
 
-        // Encontrar BASE: e EXT: linhas
-        const lines = block.split(/\r?\n/);
+        const lines = body.split('\n');
         let baseText = "";
         const exts = [];
         let mode = null;
         let buffer = [];
         const flush = () => {
-            if (mode === "BASE") baseText = buffer.join(" ").trim();
-            else if (mode === "EXT") exts.push(buffer.join(" ").trim());
+            if (!buffer.length) { return; }
+            const t = buffer.join(' ').replace(/\s+/g, ' ').trim();
+            if (!t) { buffer = []; return; }
+            if (mode === 'BASE') baseText = t;
+            else if (mode === 'EXT') exts.push(t);
             buffer = [];
         };
         for (const raw of lines) {
             const line = raw.trim();
-            if (/^SCENE\s+\d+/i.test(line)) continue; // header
-            const baseHit = line.match(/^BASE\s*:\s*(.*)$/i);
-            const extHit = line.match(/^EXT\s*:\s*(.*)$/i);
+            if (!line) continue;
+            // Suporta BASE: / BASE - / BASE.  (tolerante)
+            const baseHit = line.match(/^BASE\b\s*[:\-\.]?\s*(.*)$/i);
+            // Suporta EXT: / EXT 1: / EXT - / EXTENSAO: etc
+            const extHit  = line.match(/^EXT(?:ENS[AÃ]O)?\b\s*\d*\s*[:\-\.]?\s*(.*)$/i);
             if (baseHit) {
                 flush();
-                mode = "BASE";
+                mode = 'BASE';
                 if (baseHit[1]) buffer.push(baseHit[1]);
             } else if (extHit) {
                 flush();
-                mode = "EXT";
+                mode = 'EXT';
                 if (extHit[1]) buffer.push(extHit[1]);
-            } else if (mode && line) {
+            } else if (mode) {
                 buffer.push(line);
             }
         }
         flush();
 
-        if (!baseText) continue;
+        if (!baseText) {
+            console.warn('[Parser] SCENE', markers[i].num, 'sem BASE — ignorada');
+            continue;
+        }
         const cleanExts = exts.filter(t => t).slice(0, 20);
+        console.log('[Parser] SCENE', markers[i].num,
+            '| base.len=' + baseText.length,
+            '| exts=' + cleanExts.length,
+            '| basePrev=' + JSON.stringify(baseText.substring(0, 60)),
+            '| extPrev=' + JSON.stringify(cleanExts.map(t => t.substring(0, 40))));
         scenes.push({
-            number: sceneNum,
+            number: markers[i].num,
             elements,
             base: baseText,
             extensions: cleanExts,
-            status: "waiting",        // waiting|base_sent|base_generated|extending|done|failed
+            status: "waiting",
             currentExtIdx: -1,
             currentMediaId: null,
             finalMediaId: null,
@@ -2147,6 +2167,7 @@ function parseScenes(input) {
         });
     }
     scenes.sort((a, b) => a.number - b.number);
+    console.log('[Parser] Total cenas:', scenes.length);
     return scenes;
 }
 
@@ -2204,11 +2225,14 @@ function displayScenes() {
             : sc.status === "base_generated" ? "BASE OK"
             : sc.status === "base_sent" ? "BASE..."
             : "...";
+        const extsHtml = sc.extensions.map((t, i) =>
+            '<div class="scene-ext"><strong>EXT ' + (i + 1) + ':</strong> ' + escapeHtml(t.substring(0, 200)) + '</div>'
+        ).join('');
         item.innerHTML =
             '<div class="prompt-num">SCENE ' + sc.number + ' (' + total + 's)</div>' +
             '<div class="prompt-text">' +
-                '<strong>BASE:</strong> ' + escapeHtml(sc.base.substring(0, 80)) +
-                (sc.extensions.length ? '<br><em>+' + sc.extensions.length + ' EXT</em>' : '') +
+                '<div class="scene-base"><strong>BASE:</strong> ' + escapeHtml(sc.base.substring(0, 200)) + '</div>' +
+                extsHtml +
             '</div>' +
             '<div class="prompt-status">' + statusIcon + '</div>';
         container.appendChild(item);
