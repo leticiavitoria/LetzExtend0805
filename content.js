@@ -4658,13 +4658,17 @@
     }
 
     function _findEstenderButton() {
-        // Botao na barra inferior do detalhe: texto "Estender" / "Extend"
+        // Botao na barra inferior do detalhe: texto "» Estender" / "Extend" (com chevron unicode)
         const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
         for (const b of candidates) {
             if (b.offsetParent === null) continue;
             const t = (b.textContent || '').toLowerCase().trim();
-            // Igual ou comeca com "estender"/"extend" (sem confundir com extender de menu)
-            if (/^(>+\s*)?estender\b/.test(t) || /^(>+\s*)?extend\b/.test(t)) return b;
+            if (!t) continue;
+            // Word-boundary match — aceita "estender", "» estender", ">> estender", etc.
+            if (/\bestender\b/.test(t) || /\bextend\b/.test(t)) {
+                // Evitar matches falsos: limitar tamanho do texto (botao real e curto)
+                if (t.length <= 30) return b;
+            }
         }
         return null;
     }
@@ -4775,20 +4779,31 @@
     }
 
     async function _openDetailForMediaId(mediaId) {
-        // Ja em detalhe?
-        if (_findEstenderButton()) return true;
-        // 1) Tentar achar thumb pelo mediaId
+        if (_findEstenderButton()) { console.log('[Extend] detalhe ja aberto'); return true; }
         let target = _findThumbByMediaId(mediaId);
-        // 2) Fallback: thumb mais recente
         if (!target) target = _findMostRecentVideoThumb();
         if (!target) {
             console.warn('[Extend] nenhum thumb encontrado para abrir detalhe');
             return false;
         }
+        // Tenta clicar no proprio elemento (TRUSTED click usa centro do bounding rect).
         await _trustedClickEl(target);
-        // Aguardar transicao para detalhe (Estender button aparecer)
-        const ok = await _waitForElement(_findEstenderButton, 6000);
-        return !!ok;
+        if (await _waitForElement(_findEstenderButton, 4000)) return true;
+        // Fallback: subir para o card clicavel e tentar de novo
+        const card = target.closest('[role="button"], button, a, [data-testid], [role="listitem"]');
+        if (card && card !== target) {
+            console.log('[Extend] retry clicando no card clicavel ancestral');
+            await _trustedClickEl(card);
+            if (await _waitForElement(_findEstenderButton, 4000)) return true;
+        }
+        // Ultimo recurso: dump de botoes visiveis para debug
+        const btns = Array.from(document.querySelectorAll('button, [role="button"]'))
+            .filter(b => b.offsetParent !== null)
+            .map(b => (b.textContent || '').trim().substring(0, 30))
+            .filter(t => t)
+            .slice(0, 20);
+        console.warn('[Extend] detail nao abriu. Botoes visiveis:', btns);
+        return false;
     }
 
     async function _selectLowerPriorityModel(maxRetries) {
