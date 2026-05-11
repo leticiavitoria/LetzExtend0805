@@ -5036,49 +5036,70 @@
         return null;
     }
 
+    function _findFullVideoMenuItem() {
+        // Item "Video completo" / "Vídeo completo" no menu de download (abre submenu)
+        const candidates = Array.from(document.querySelectorAll('[role="menuitem"], button, li, a, div[tabindex], div[role]')).filter(_isVisible);
+        for (const c of candidates) {
+            const t = _allText(c);
+            if (!t || t.length > 60) continue;
+            if (/v(í|i)deo\s*completo/.test(t)) {
+                console.log('[Extend] fullVideoMenuItem MATCH:', t);
+                return c;
+            }
+        }
+        return null;
+    }
+
+    function _findFullVideoQualityOption() {
+        // Submenu de "Video completo": primeira opcao (ex.: "720p Tamanho original").
+        // Evita a opcao Zip (que baixa todos os clipes separados).
+        const candidates = Array.from(document.querySelectorAll('[role="menuitem"], button, li, a, div[tabindex], div[role]')).filter(_isVisible);
+        for (const c of candidates) {
+            const t = _allText(c);
+            if (!t || t.length > 100) continue;
+            if (/\bzip\b|todos\s*os\s*clipes/.test(t)) continue;
+            if (/720p|1080p|tamanho\s*original|original\s*size|full\s*size/.test(t)) {
+                console.log('[Extend] fullVideoQualityOption MATCH:', t);
+                return c;
+            }
+        }
+        return null;
+    }
+
     async function runExtendDownload(scene) {
         console.log('[Extend] runExtendDownload SCENE', scene.number, 'mediaId=' + (scene.mediaId || '?').substring(0, 12));
         try {
-            // Estrategia preferida: clicar no botao de download nativo do Flow.
-            // Ele baixa o video completo (concatenado) — cada EXT individual no DOM
-            // e apenas o segmento de +7s, nao a cena completa.
             const dlBtn = _findFlowDownloadButton();
-            if (dlBtn) {
-                console.log('[Extend] botao download nativo encontrado — preparando intercept');
-                // Avisar background para interceptar o proximo download e renomear
-                await chrome.runtime.sendMessage({
-                    action: 'EXTEND_EXPECT_NATIVE_DOWNLOAD',
-                    sceneNumber: scene.number,
-                    folder: scene.folder,
-                    totalSeconds: scene.totalSeconds
-                });
-                await _trustedClickEl(dlBtn);
-                // Aguardar download comecar (browser fire onDeterminingFilename)
-                await sleep(2500);
-                await _ensureProjectHome();
-                return { success: true };
-            }
+            if (!dlBtn) throw new Error('download_button_not_found');
 
-            // Fallback legado: tentar baixar via URL do <video>
-            console.warn('[Extend] botao download nativo nao encontrado — fallback URL');
-            const frag = (scene.mediaId || '').split('/').pop().split(':').pop();
-            let videoUrl = null;
-            const videos = Array.from(document.querySelectorAll('video'));
-            for (const v of videos) {
-                const src = v.src || v.querySelector('source')?.src || '';
-                if (src && (!frag || src.includes(frag))) { videoUrl = src; break; }
-            }
-            if (!videoUrl && videos.length) videoUrl = videos[videos.length - 1].src;
-            if (!videoUrl) throw new Error('video_url_not_found');
-
-            const filename = 'SCENE_' + String(scene.number).padStart(3, '0') + '_' + scene.totalSeconds + 's.mp4';
+            // Avisar background p/ interceptar e renomear o proximo download
             await chrome.runtime.sendMessage({
-                action: 'DOWNLOAD_VIDEO',
-                url: videoUrl,
-                filename,
-                folder: scene.folder
+                action: 'EXTEND_EXPECT_NATIVE_DOWNLOAD',
+                sceneNumber: scene.number,
+                folder: scene.folder,
+                totalSeconds: scene.totalSeconds
             });
-            await sleep(800);
+
+            // 1) Abrir menu de download
+            console.log('[Extend] passo 1: clicando icone download');
+            await _trustedClickEl(dlBtn);
+            await sleep(700);
+
+            // 2) Clicar em "Video completo" (abre submenu)
+            console.log('[Extend] passo 2: procurando "Video completo"');
+            const fullItem = await _waitForElement(_findFullVideoMenuItem, 5000);
+            if (!fullItem) throw new Error('full_video_menu_not_found');
+            await _trustedClickEl(fullItem);
+            await sleep(600);
+
+            // 3) Clicar em opcao de qualidade (720p / Tamanho original)
+            console.log('[Extend] passo 3: procurando opcao de qualidade');
+            const quality = await _waitForElement(_findFullVideoQualityOption, 5000);
+            if (!quality) throw new Error('quality_option_not_found');
+            await _trustedClickEl(quality);
+            await sleep(3000); // tempo p/ download disparar
+
+            // Voltar para home para a proxima cena comecar limpa
             await _ensureProjectHome();
             return { success: true };
         } catch (e) {
