@@ -4578,7 +4578,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.0.0 ready");
+        console.log("[Lets Automate] v3.1.0 ready");
     }
 
     if (document.readyState === "loading") {
@@ -4657,33 +4657,47 @@
         return null;
     }
 
+    function _isVisible(el) {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 1 || r.height <= 1) return false;
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+        if (parseFloat(cs.opacity || '1') === 0) return false;
+        return true;
+    }
+
+    function _allText(el) {
+        // Texto + aria-label + title, em minusculas, espacos colapsados
+        const t = (el.innerText || el.textContent || '') + ' ' +
+                  (el.getAttribute('aria-label') || '') + ' ' +
+                  (el.getAttribute('title') || '');
+        return t.toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+
     function _findEstenderButton() {
-        // Botao na barra inferior do detalhe: texto "» Estender" / "Extend" (com chevron unicode)
+        // CRITICO: NAO usar offsetParent (retorna null para position:fixed,
+        // que e o caso da barra inferior do detalhe do Flow).
         const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
         for (const b of candidates) {
-            if (b.offsetParent === null) continue;
-            const t = (b.textContent || '').toLowerCase().trim();
-            if (!t) continue;
-            // Word-boundary match — aceita "estender", "» estender", ">> estender", etc.
-            if (/\bestender\b/.test(t) || /\bextend\b/.test(t)) {
-                // Evitar matches falsos: limitar tamanho do texto (botao real e curto)
-                if (t.length <= 30) return b;
-            }
+            if (!_isVisible(b)) continue;
+            const t = _allText(b);
+            if (!t || t.length > 80) continue;
+            if (/\bestender\b/.test(t) || /\bextend\b/.test(t)) return b;
         }
         return null;
     }
 
     function _findModelDropdownTrigger() {
-        // Procura o trigger do dropdown de modelo: texto "Veo 3.1 ...", preferindo
-        // o que estiver perto do textbox (mesma row do submit).
         const tb = document.querySelector('[role="textbox"]');
-        const tbRect = tb ? tb.getBoundingClientRect() : null;
+        const tbRect = tb && _isVisible(tb) ? tb.getBoundingClientRect() : null;
         const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
         const matches = [];
         for (const b of candidates) {
-            if (b.offsetParent === null) continue;
-            const t = (b.textContent || '').trim();
-            if (/Veo\s*3\.1\b/i.test(t) && t.length < 80) {
+            if (!_isVisible(b)) continue;
+            const t = _allText(b);
+            if (!t || t.length > 80) continue;
+            if (/veo\s*3\.1\b/.test(t)) {
                 let dist = 99999;
                 if (tbRect) {
                     const r = b.getBoundingClientRect();
@@ -4699,21 +4713,19 @@
     }
 
     function _findLowerPriorityOption() {
-        // Procura o item do dropdown "Veo 3.1 - Lite [Lower Priority]"
-        // Aceita variacoes de espacamento/colchete.
-        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div[tabindex]', 'div[role]'];
+        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div[tabindex]', 'div[role]', 'a'];
         const seen = new Set();
         for (const sel of sels) {
             const nodes = Array.from(document.querySelectorAll(sel));
             for (const n of nodes) {
                 if (seen.has(n)) continue;
                 seen.add(n);
-                if (n.offsetParent === null) continue;
-                const t = (n.textContent || '').trim();
-                if (t.length > 120) continue;
-                if (!/Lower\s*Priority/i.test(t)) continue;
-                if (!/Lite/i.test(t)) continue;
-                if (/Fast/i.test(t)) continue;
+                if (!_isVisible(n)) continue;
+                const t = _allText(n);
+                if (!t || t.length > 120) continue;
+                if (!/lower\s*priority/.test(t)) continue;
+                if (!/lite/.test(t)) continue;
+                if (/fast/.test(t)) continue;
                 console.log('[Extend] lowerPriorityOption MATCH:', t);
                 return n;
             }
@@ -4724,21 +4736,18 @@
     function _isLowerPrioritySelected() {
         const trigger = _findModelDropdownTrigger();
         if (!trigger) return false;
-        const t = (trigger.textContent || '').trim();
-        return /Lower\s*Priority/i.test(t) && /Lite/i.test(t) && !/Fast/i.test(t);
+        const t = _allText(trigger);
+        return /lower\s*priority/.test(t) && /lite/.test(t) && !/fast/.test(t);
     }
 
     function _findTextareaForExtend() {
-        // Slate textbox visivel; preferir o que tem placeholder "Qual e a proxima etapa"
         const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
         for (const t of tbs) {
-            if (t.offsetParent === null) continue;
+            if (!_isVisible(t)) continue;
             const ph = (t.getAttribute('aria-placeholder') || t.getAttribute('data-placeholder') || '').toLowerCase();
             if (ph.includes('proxima etapa') || ph.includes('próxima etapa') || ph.includes('next step')) return t;
         }
-        for (const t of tbs) {
-            if (t.offsetParent !== null) return t;
-        }
+        for (const t of tbs) { if (_isVisible(t)) return t; }
         return null;
     }
 
@@ -4746,7 +4755,6 @@
         if (!mediaId) return null;
         const frag = mediaId.split('/').pop().split(':').pop();
         if (!frag) return null;
-        // 1) <video> ou <img> cujo src contenha o fragmento
         const candidates = Array.from(document.querySelectorAll('video, img, source, [data-media-id], [data-id], [data-name]'));
         for (const c of candidates) {
             const src = c.src || c.getAttribute('src') || c.getAttribute('data-media-id') || c.getAttribute('data-id') || c.getAttribute('data-name') || '';
@@ -4760,17 +4768,15 @@
     }
 
     function _findMostRecentVideoThumb() {
-        // Fallback: pega o thumb de video mais recente (ultimo no DOM, em geral o ultimo gerado)
-        const videos = Array.from(document.querySelectorAll('video')).filter(v => v.offsetParent !== null);
+        const videos = Array.from(document.querySelectorAll('video')).filter(v => _isVisible(v));
         if (videos.length) {
             const v = videos[videos.length - 1];
             const clickable = v.closest('button, a, [role="button"], [role="listitem"], [data-testid]') || v.parentElement || v;
             console.log('[Extend] fallback: ultimo thumb de video');
             return clickable;
         }
-        // Sem <video>, tenta cards com poster image em layout de grid
         const imgs = Array.from(document.querySelectorAll('img')).filter(i =>
-            i.offsetParent !== null && i.naturalWidth > 100 && i.closest('[role="button"], button, a, [data-testid]'));
+            _isVisible(i) && i.naturalWidth > 100 && i.closest('[role="button"], button, a, [data-testid]'));
         if (imgs.length) {
             const im = imgs[imgs.length - 1];
             return im.closest('[role="button"], button, a, [data-testid]');
@@ -4798,11 +4804,16 @@
         }
         // Ultimo recurso: dump de botoes visiveis para debug
         const btns = Array.from(document.querySelectorAll('button, [role="button"]'))
-            .filter(b => b.offsetParent !== null)
-            .map(b => (b.textContent || '').trim().substring(0, 30))
-            .filter(t => t)
-            .slice(0, 20);
-        console.warn('[Extend] detail nao abriu. Botoes visiveis:', btns);
+            .filter(b => _isVisible(b))
+            .map(b => {
+                const txt = ((b.innerText || b.textContent || '').trim()).replace(/\s+/g, ' ').substring(0, 50);
+                const aria = (b.getAttribute('aria-label') || '').substring(0, 30);
+                return txt + (aria ? ' [aria=' + aria + ']' : '');
+            })
+            .filter(t => t.replace(/\[aria=\]/, '').trim())
+            .slice(0, 40);
+        console.warn('[Extend] detail nao abriu. Botoes visiveis (' + btns.length + '):');
+        btns.forEach((s, i) => console.warn('  [' + i + '] ' + s));
         return false;
     }
 
@@ -4893,19 +4904,19 @@
         );
 
         // Estrategia 2: botao com icone material "arrow_back"
-        if (!back || back.offsetParent === null) {
+        if (!back || !_isVisible(back)) {
             const icons = Array.from(document.querySelectorAll('i, span'))
-                .filter(i => i.offsetParent !== null && /arrow_back\b/i.test(i.textContent || ''));
+                .filter(i => _isVisible(i) && /arrow_back\b/i.test(i.textContent || ''));
             for (const ic of icons) {
                 const parent = ic.closest('button, a, [role="button"]');
-                if (parent && parent.offsetParent !== null) { back = parent; break; }
+                if (parent && _isVisible(parent)) { back = parent; break; }
             }
         }
 
         // Estrategia 3: primeiro botao no canto superior esquerdo (top<100, left<100)
-        if (!back || back.offsetParent === null) {
+        if (!back || !_isVisible(back)) {
             const cands = Array.from(document.querySelectorAll('button, a, [role="button"]'))
-                .filter(b => b.offsetParent !== null);
+                .filter(b => _isVisible(b));
             for (const c of cands) {
                 const r = c.getBoundingClientRect();
                 if (r.top < 80 && r.left < 80 && r.width < 80 && r.height < 80) {
