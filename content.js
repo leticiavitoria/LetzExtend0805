@@ -4829,8 +4829,10 @@
         console.log('[Extend] runExtendBase SCENE', scene.number);
         _installExtendInterceptListener();
         try {
-            // Garantir que estamos na home do projeto: clicar voltar se houver
-            await _ensureProjectHome();
+            // Garantir que estamos na home do projeto antes de submeter BASE.
+            // CRITICO: se ainda estivermos no detalhe, BASE seria tratada como extensao.
+            const onHome = await _ensureProjectHome();
+            if (!onHome) throw new Error('cannot_return_to_project_home');
 
             // Lidar com elementos (refs de imagem) caso existam
             if (Array.isArray(scene.elements) && scene.elements.length) {
@@ -4861,13 +4863,62 @@
     }
 
     async function _ensureProjectHome() {
-        // Se estamos no detalhe do video, clicar no botao voltar (seta superior esquerda)
-        const back = document.querySelector('button[aria-label*="Voltar" i], button[aria-label*="Back" i], a[aria-label*="Voltar" i]');
-        if (back && back.offsetParent !== null) {
-            console.log('[Extend] voltando para home do projeto');
-            await _trustedClickEl(back);
-            await sleep(800);
+        // Se ja estamos na home (sem botao "Estender" visivel), nada a fazer.
+        if (!_findEstenderButton()) {
+            console.log('[Extend] ja estamos na home do projeto');
+            return true;
         }
+        console.log('[Extend] tentando voltar para home do projeto...');
+
+        // Estrategia 1: aria-label "Voltar"/"Back"
+        let back = document.querySelector(
+            'button[aria-label*="Voltar" i], button[aria-label*="Back" i], ' +
+            'a[aria-label*="Voltar" i], a[aria-label*="Back" i], ' +
+            '[role="button"][aria-label*="Voltar" i], [role="button"][aria-label*="Back" i]'
+        );
+
+        // Estrategia 2: botao com icone material "arrow_back"
+        if (!back || back.offsetParent === null) {
+            const icons = Array.from(document.querySelectorAll('i, span'))
+                .filter(i => i.offsetParent !== null && /arrow_back\b/i.test(i.textContent || ''));
+            for (const ic of icons) {
+                const parent = ic.closest('button, a, [role="button"]');
+                if (parent && parent.offsetParent !== null) { back = parent; break; }
+            }
+        }
+
+        // Estrategia 3: primeiro botao no canto superior esquerdo (top<100, left<100)
+        if (!back || back.offsetParent === null) {
+            const cands = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+                .filter(b => b.offsetParent !== null);
+            for (const c of cands) {
+                const r = c.getBoundingClientRect();
+                if (r.top < 80 && r.left < 80 && r.width < 80 && r.height < 80) {
+                    back = c; break;
+                }
+            }
+        }
+
+        if (!back) {
+            // Tentar tecla Escape como ultimo recurso
+            console.warn('[Extend] back nao encontrado — tentando Esc');
+            document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+            await sleep(800);
+        } else {
+            await _trustedClickEl(back);
+            await sleep(900);
+        }
+
+        // Verificar que saiu do detalhe (Estender nao esta mais visivel)
+        for (let i = 0; i < 8; i++) {
+            if (!_findEstenderButton()) {
+                console.log('[Extend] de volta na home');
+                return true;
+            }
+            await sleep(300);
+        }
+        console.warn('[Extend] FALHA ao voltar para home — Estender ainda visivel');
+        return false;
     }
 
     async function runExtendExt(scene) {
@@ -4879,13 +4930,8 @@
             if (!opened) throw new Error('detail_view_not_opened');
             await sleep(800); // DOM acomodar
 
-            // 2) Clicar no botao "Estender" para entrar em modo extensao
-            const estenderBtn = await _waitForElement(_findEstenderButton, 6000);
-            if (!estenderBtn) throw new Error('estender_btn_not_found');
-            await _trustedClickEl(estenderBtn);
-            await sleep(700);
-
-            // 3) Sempre garantir Lower Priority selecionado (mais robusto que so na 1a EXT)
+            // 2) PRIMEIRO: trocar modelo para Lower Priority (antes de qualquer outra acao).
+            // Se falhar, abortamos para nao gastar creditos.
             if (scene.useLite) {
                 const ok = await _selectLowerPriorityModel(2);
                 if (!ok) {
@@ -4894,14 +4940,27 @@
                 }
             }
 
-            // 4) Preencher textarea de extensao
+            // 3) Clicar no botao "Estender" para entrar em modo extensao
+            const estenderBtn = await _waitForElement(_findEstenderButton, 6000);
+            if (!estenderBtn) throw new Error('estender_btn_not_found');
+            await _trustedClickEl(estenderBtn);
+            await sleep(700);
+
+            // 4) Re-verificar modelo (alguns dropdowns resetam ao entrar em modo extend)
+            if (scene.useLite && !_isLowerPrioritySelected()) {
+                console.log('[Extend] modelo resetou apos Estender — re-selecionando');
+                const ok2 = await _selectLowerPriorityModel(2);
+                if (!ok2) throw new Error('lower_priority_lost_after_estender');
+            }
+
+            // 5) Preencher textarea de extensao
             const ta = await _waitForElement(_findTextareaForExtend, 4000);
             if (!ta) throw new Error('textarea_not_found');
             const filled = await fillTextarea(scene.text);
             if (!filled) throw new Error('fill_textarea_failed');
             await sleep(300);
 
-            // 5) Marcar pending e submeter
+            // 6) Marcar pending e submeter
             _extendPending = { sceneNumber: scene.number, kind: 'ext' };
             const ok = await clickCreateButton();
             if (!ok) {
@@ -4938,6 +4997,9 @@
                 filename,
                 folder: scene.folder
             });
+            // Volta para a home do projeto para a proxima cena comecar limpa
+            await sleep(800);
+            await _ensureProjectHome();
             return { success: true };
         } catch (e) {
             console.error('[Extend] download erro:', e.message);
