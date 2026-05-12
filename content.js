@@ -5069,6 +5069,15 @@
     async function runExtendDownload(scene) {
         console.log('[Extend] runExtendDownload SCENE', scene.number, 'mediaId=' + (scene.mediaId || '?').substring(0, 12));
         try {
+            // Garantir que estamos no detalhe do video alvo. Cenas com 0 EXTs
+            // pulam direto da home para download — precisamos abrir o detalhe primeiro.
+            if (!_findEstenderButton()) {
+                console.log('[Extend] download: detalhe nao aberto, abrindo via mediaId...');
+                const opened = await _openDetailForMediaId(scene.mediaId);
+                if (!opened) throw new Error('detail_not_opened_for_download');
+                await sleep(800);
+            }
+
             const dlBtn = _findFlowDownloadButton();
             if (!dlBtn) throw new Error('download_button_not_found');
 
