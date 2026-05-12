@@ -2256,6 +2256,8 @@ async function startSendingScenes() {
     st.useLite = !!document.getElementById("extendUseLite")?.checked;
     el(tab, "startBtn").classList.add("hidden");
     el(tab, "stopBtn").classList.remove("hidden");
+    const retryBtn = document.getElementById("extendRetryFailedBtn");
+    if (retryBtn) retryBtn.classList.add("hidden");
     updateBlockedOverlay();
     updateStatus("running", "Iniciando envio de cenas...");
 
@@ -2316,6 +2318,60 @@ function handleSceneQueueComplete() {
     const done = st.scenes.filter(s => s.status === "done").length;
     const failed = st.scenes.filter(s => s.status === "failed").length;
     updateStatus("success", "Cenas concluidas: " + done + " OK, " + failed + " falhas");
+    // Mostra botao de retry se houver falhas
+    const retryBtn = document.getElementById("extendRetryFailedBtn");
+    if (retryBtn) retryBtn.classList.toggle("hidden", failed === 0);
+}
+
+async function retryFailedScenes() {
+    const st = tabState.extend;
+    const failed = st.scenes.filter(s => s.status === "failed");
+    if (!failed.length) { updateStatus("warning", "Nenhuma cena falhou"); return; }
+    if (st.isRunning) { updateStatus("warning", "Envio ja em andamento"); return; }
+    const running = getRunningTab();
+    if (running && running !== "extend") {
+        updateStatus("error", "Outra aba esta rodando: " + running);
+        return;
+    }
+
+    // Reset status das cenas falhas para que sejam re-executadas
+    for (const s of failed) {
+        s.status = "waiting";
+        s.currentExtIdx = -1;
+        s.currentMediaId = null;
+        s.finalMediaId = null;
+        s.errorReason = null;
+    }
+    displayScenes();
+    updateExtendStats();
+
+    st.isRunning = true;
+    document.getElementById("extendRetryFailedBtn").classList.add("hidden");
+    el("extend", "startBtn").classList.add("hidden");
+    el("extend", "stopBtn").classList.remove("hidden");
+    updateBlockedOverlay();
+    updateStatus("running", "Reenviando " + failed.length + " cena(s) que falharam...");
+
+    try {
+        await chrome.runtime.sendMessage({
+            action: "EXTEND_START_QUEUE",
+            scenes: failed.map(s => ({
+                number: s.number,
+                elements: s.elements || [],
+                base: s.base,
+                extensions: s.extensions || []
+            })),
+            folder: tabState.extend.folder || "LetzScenes",
+            useLite: st.useLite !== false
+        });
+    } catch (e) {
+        console.error("[Panel] retry erro:", e);
+        st.isRunning = false;
+        el("extend", "stopBtn").classList.add("hidden");
+        el("extend", "startBtn").classList.remove("hidden");
+        updateStatus("error", "Erro ao reenviar: " + e.message);
+        updateBlockedOverlay();
+    }
 }
 
 function updateExtendStats() {
@@ -2340,10 +2396,12 @@ function wireExtendTab() {
     const folderInput = document.getElementById("extendFolder");
     const useLite = document.getElementById("extendUseLite");
     const cancelBtn = document.getElementById("extendCancelAllBtn");
+    const retryBtn = document.getElementById("extendRetryFailedBtn");
 
     if (processBtn) processBtn.addEventListener("click", () => processScenes());
     if (stopBtn) stopBtn.addEventListener("click", () => stopSendingScenes());
     if (cancelBtn) cancelBtn.addEventListener("click", () => stopSendingScenes());
+    if (retryBtn) retryBtn.addEventListener("click", () => retryFailedScenes());
     if (folderInput) {
         folderInput.addEventListener("change", (e) => {
             tabState.extend.folder = e.target.value.trim() || "LetzScenes";
