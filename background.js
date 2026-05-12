@@ -1998,12 +1998,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     break;
 
                 case "EXTEND_EXPECT_NATIVE_DOWNLOAD":
-                    _extendPendingDownload = {
+                    _installExtendDownloadListener({
                         sceneNumber: message.sceneNumber,
                         folder: message.folder || 'LetzScenes',
                         totalSeconds: message.totalSeconds,
                         startedAt: Date.now()
-                    };
+                    });
                     console.log('[Extend] aguardando download nativo SCENE', message.sceneNumber);
                     sendResponse({ success: true });
                     break;
@@ -2276,18 +2276,21 @@ async function _finalizeScene(scene) {
 
 // ============================================================
 // EXTEND — intercept de download nativo do Flow
-// Quando o content.js clica no botao "Baixar" do Flow, esta funcao
-// renomeia o arquivo conforme nossa convencao SCENE_NNN_{Xs}.mp4
-// dentro da pasta configurada.
+// Listener registrado JUST-IN-TIME e removido logo apos renomear ou
+// timeout, para nao interferir nos downloads regulares (aba Video/
+// Frame/Imagem) que ja usam filename completo via chrome.downloads.download.
 // ============================================================
 let _extendPendingDownload = null; // {sceneNumber, folder, totalSeconds, startedAt}
+let _extendDownloadListener = null;
+let _extendDownloadTimeoutId = null;
 
-if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
-    chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+function _installExtendDownloadListener(pending) {
+    _extendPendingDownload = pending;
+    if (_extendDownloadListener) return; // ja instalado
+    _extendDownloadListener = function (item, suggest) {
         try {
-            if (!_extendPendingDownload) return;
-            if (Date.now() - _extendPendingDownload.startedAt > 30000) {
-                _extendPendingDownload = null;
+            if (!_extendPendingDownload) {
+                _removeExtendDownloadListener();
                 return;
             }
             const ext = ((item.filename || '').match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
@@ -2297,8 +2300,36 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
             console.log('[Extend] renomeando download:', item.filename, '->', newName);
             suggest({ filename: newName, conflictAction: 'uniquify' });
             _extendPendingDownload = null;
+            _removeExtendDownloadListener();
         } catch (e) {
             console.error('[Extend] onDeterminingFilename erro:', e.message);
+            _removeExtendDownloadListener();
         }
-    });
+    };
+    try {
+        chrome.downloads.onDeterminingFilename.addListener(_extendDownloadListener);
+        console.log('[Extend] download listener instalado');
+    } catch (e) {
+        console.error('[Extend] addListener falhou:', e.message);
+    }
+    // Timeout de seguranca: remove listener se nenhum download disparar
+    if (_extendDownloadTimeoutId) clearTimeout(_extendDownloadTimeoutId);
+    _extendDownloadTimeoutId = setTimeout(() => {
+        if (_extendDownloadListener) {
+            console.log('[Extend] timeout - removendo listener (nenhum download capturado)');
+            _removeExtendDownloadListener();
+        }
+    }, 30000);
+}
+
+function _removeExtendDownloadListener() {
+    if (_extendDownloadListener) {
+        try { chrome.downloads.onDeterminingFilename.removeListener(_extendDownloadListener); } catch (e) {}
+        _extendDownloadListener = null;
+    }
+    if (_extendDownloadTimeoutId) {
+        clearTimeout(_extendDownloadTimeoutId);
+        _extendDownloadTimeoutId = null;
+    }
+    _extendPendingDownload = null;
 }
