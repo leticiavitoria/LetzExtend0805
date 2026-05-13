@@ -4963,7 +4963,14 @@
         console.log('[Extend] runExtendExt SCENE', scene.number, 'idx', scene.extIdx, 'isFirstExt=' + scene.isFirstExt);
         _installExtendInterceptListener();
         try {
-            // 1) Abrir detalhe do video alvo (multiplas estrategias)
+            // 1) Abrir detalhe do video alvo (multiplas estrategias).
+            // Em modo RESUME, forca voltar para home antes para nao confundir
+            // com um detalhe antigo aberto manualmente.
+            if (scene.forceReopenDetail) {
+                console.log('[Extend] forceReopenDetail=true — voltando p/ home antes de abrir detalhe alvo');
+                await _ensureProjectHome();
+                await sleep(400);
+            }
             const opened = await _openDetailForMediaId(scene.baseMediaId);
             if (!opened) throw new Error('detail_view_not_opened');
             await sleep(800); // DOM acomodar
@@ -5089,14 +5096,19 @@
                 totalSeconds: scene.totalSeconds
             });
 
-            // 1) Abrir menu de download
-            console.log('[Extend] passo 1: clicando icone download');
-            await _trustedClickEl(dlBtn);
-            await sleep(700);
-
-            // 2) Clicar em "Video completo" (abre submenu)
-            console.log('[Extend] passo 2: procurando "Video completo"');
-            const fullItem = await _waitForElement(_findFullVideoMenuItem, 5000);
+            // 1+2) Abrir menu de download e achar "Video completo" — com retry
+            let fullItem = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                console.log('[Extend] passo 1 (tent ' + attempt + '): clicando icone download');
+                await _trustedClickEl(dlBtn);
+                await sleep(800);
+                console.log('[Extend] passo 2: procurando "Video completo"');
+                fullItem = await _waitForElement(_findFullVideoMenuItem, 4000);
+                if (fullItem) break;
+                console.warn('[Extend] menu nao apareceu — fechando e tentando de novo');
+                document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+                await sleep(500);
+            }
             if (!fullItem) throw new Error('full_video_menu_not_found');
             await _trustedClickEl(fullItem);
             await sleep(600);

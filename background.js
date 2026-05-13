@@ -2101,7 +2101,13 @@ async function extendStartQueue(scenes, folder, useLite) {
             status: "waiting",
             currentExtIdx: -1,
             currentMediaId: null,
-            finalMediaId: null
+            finalMediaId: null,
+            // Tracking de progresso para resume:
+            lastSuccessMediaId: null,    // ultimo mediaId que terminou com COMPLETED (BASE ou EXT)
+            lastSuccessExtIdx: -1,       // -1 = BASE foi o ultimo success; 0+ = idx do ultimo EXT success
+            // Resume hints (vindos do retry):
+            resumeFromMediaId: s.resumeFromMediaId || null,
+            resumeFromExtIdx: (typeof s.resumeFromExtIdx === 'number') ? s.resumeFromExtIdx : -1
         })),
         folder: folder || "LetzScenes",
         useLite: useLite !== false,
@@ -2131,6 +2137,31 @@ async function extendNextScene() {
         return;
     }
     const scene = _extendQueue.scenes[_extendQueue.currentIdx];
+
+    // MODO RESUME: cena tem mediaId de progresso anterior — pula BASE e
+    // retoma a partir da proxima EXT depois de resumeFromExtIdx.
+    if (scene.resumeFromMediaId) {
+        const nextExtIdx = scene.resumeFromExtIdx + 1;
+        if (nextExtIdx >= scene.extensions.length) {
+            // Tudo ja foi feito — so falta o download
+            console.log("[Extend] resumindo SCENE", scene.number, "ja completa, indo direto p/ download");
+            scene.currentMediaId = scene.resumeFromMediaId;
+            scene.lastSuccessMediaId = scene.resumeFromMediaId;
+            scene.lastSuccessExtIdx = scene.resumeFromExtIdx;
+            _finalizeScene(scene);
+            return;
+        }
+        console.log("[Extend] RESUME SCENE", scene.number, "from EXT idx", nextExtIdx, "(media=" + scene.resumeFromMediaId.substring(0, 12) + ")");
+        scene.currentMediaId = scene.resumeFromMediaId;
+        scene.currentExtIdx = scene.resumeFromExtIdx; // _advanceExtension fara o ++
+        scene.lastSuccessMediaId = scene.resumeFromMediaId;
+        scene.lastSuccessExtIdx = scene.resumeFromExtIdx;
+        scene._forceReopenDetail = true; // sinaliza para a 1a chamada apos resume
+        _sceneUpdate(scene, { status: "extending", currentExtIdx: scene.currentExtIdx, currentMediaId: scene.currentMediaId });
+        _advanceExtension(scene);
+        return;
+    }
+
     console.log("[Extend] iniciando SCENE", scene.number);
     _sceneUpdate(scene, { status: "base_sent" });
 
@@ -2197,12 +2228,24 @@ function extendOnVideoStatus(updates) {
         if (u.status === "COMPLETED") {
             if (_extendActiveTimeout) { clearTimeout(_extendActiveTimeout); _extendActiveTimeout = null; }
             if (scene.status === "base_sent") {
-                _sceneUpdate(scene, { status: "base_generated" });
+                // BASE concluida — registra como ultimo success
+                scene.lastSuccessMediaId = scene.currentMediaId;
+                scene.lastSuccessExtIdx = -1;
+                _sceneUpdate(scene, {
+                    status: "base_generated",
+                    lastSuccessMediaId: scene.lastSuccessMediaId,
+                    lastSuccessExtIdx: -1
+                });
                 _advanceExtension(scene);
             } else if (scene.status === "extending") {
-                // EXT atual concluida
+                // EXT atual concluida — registra como ultimo success
+                scene.lastSuccessMediaId = scene.currentMediaId;
+                scene.lastSuccessExtIdx = scene.currentExtIdx;
+                _sceneUpdate(scene, {
+                    lastSuccessMediaId: scene.lastSuccessMediaId,
+                    lastSuccessExtIdx: scene.lastSuccessExtIdx
+                });
                 if (scene.currentExtIdx + 1 >= scene.extensions.length) {
-                    // ultima extensao -> finalizar
                     _finalizeScene(scene);
                 } else {
                     _advanceExtension(scene);
@@ -2228,11 +2271,14 @@ async function _advanceExtension(scene) {
     _sceneUpdate(scene, { status: "extending", currentExtIdx: scene.currentExtIdx });
     // Delay para Flow renderizar o thumb recem gerado / detalhe ficar acessivel
     await new Promise(r => setTimeout(r, scene.currentExtIdx === 0 ? 3500 : 1500));
+    const forceReopen = !!scene._forceReopenDetail;
+    scene._forceReopenDetail = false;
     try {
         await chrome.tabs.sendMessage(targetTabId, {
             action: "EXTEND_RUN_EXT",
             scene: {
                 number: scene.number,
+                forceReopenDetail: forceReopen,
                 extIdx: scene.currentExtIdx,
                 text: extText,
                 useLite: _extendQueue.useLite,
