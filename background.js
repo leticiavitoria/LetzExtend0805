@@ -2322,50 +2322,64 @@ async function _finalizeScene(scene) {
 
 // ============================================================
 // EXTEND — intercept de download nativo do Flow
-// Listener registrado JUST-IN-TIME e removido logo apos renomear ou
-// timeout, para nao interferir nos downloads regulares (aba Video/
-// Frame/Imagem) que ja usam filename completo via chrome.downloads.download.
+// Fila FIFO de downloads pendentes — varios podem estar enfileirados
+// quando Flow demora a concatenar videos longos (8 EXTs = 64s podem
+// levar varios minutos para serem servidos). Timeout estendido (8 min
+// por download) e quando a fila esvazia, o listener e removido para
+// nao interferir com downloads das outras abas (Video/Frame/Imagem).
 // ============================================================
-let _extendPendingDownload = null; // {sceneNumber, folder, totalSeconds, startedAt}
+let _extendDownloadQueue = []; // FIFO: [{sceneNumber, folder, totalSeconds, startedAt}, ...]
 let _extendDownloadListener = null;
 let _extendDownloadTimeoutId = null;
 
 function _installExtendDownloadListener(pending) {
-    _extendPendingDownload = pending;
-    if (_extendDownloadListener) return; // ja instalado
+    _extendDownloadQueue.push(pending);
+    console.log('[Extend] download enfileirado: SCENE', pending.sceneNumber,
+        '(fila agora=' + _extendDownloadQueue.length + ')');
+    _resetExtendDownloadTimeout();
+    if (_extendDownloadListener) return; // ja instalado, fila ja atende
+
     _extendDownloadListener = function (item, suggest) {
         try {
-            if (!_extendPendingDownload) {
+            if (!_extendDownloadQueue.length) {
                 _removeExtendDownloadListener();
                 return;
             }
+            const next = _extendDownloadQueue.shift();
             const ext = ((item.filename || '').match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
-            const newName = (_extendPendingDownload.folder || 'LetzScenes') + '/' +
-                'SCENE_' + String(_extendPendingDownload.sceneNumber).padStart(3, '0') +
-                '_' + _extendPendingDownload.totalSeconds + 's.' + ext;
-            console.log('[Extend] renomeando download:', item.filename, '->', newName);
+            const newName = (next.folder || 'LetzScenes') + '/' +
+                'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
+                '_' + next.totalSeconds + 's.' + ext;
+            console.log('[Extend] renomeando download:', item.filename, '->', newName,
+                '(restam=' + _extendDownloadQueue.length + ')');
             suggest({ filename: newName, conflictAction: 'uniquify' });
-            _extendPendingDownload = null;
-            _removeExtendDownloadListener();
+            if (_extendDownloadQueue.length === 0) {
+                _removeExtendDownloadListener();
+            } else {
+                _resetExtendDownloadTimeout();
+            }
         } catch (e) {
             console.error('[Extend] onDeterminingFilename erro:', e.message);
-            _removeExtendDownloadListener();
         }
     };
     try {
         chrome.downloads.onDeterminingFilename.addListener(_extendDownloadListener);
-        console.log('[Extend] download listener instalado');
+        console.log('[Extend] download listener instalado (fila=' + _extendDownloadQueue.length + ')');
     } catch (e) {
         console.error('[Extend] addListener falhou:', e.message);
     }
-    // Timeout de seguranca: remove listener se nenhum download disparar
+}
+
+function _resetExtendDownloadTimeout() {
     if (_extendDownloadTimeoutId) clearTimeout(_extendDownloadTimeoutId);
     _extendDownloadTimeoutId = setTimeout(() => {
-        if (_extendDownloadListener) {
-            console.log('[Extend] timeout - removendo listener (nenhum download capturado)');
-            _removeExtendDownloadListener();
+        if (_extendDownloadQueue.length > 0) {
+            console.warn('[Extend] timeout - descartando ' + _extendDownloadQueue.length +
+                ' download(s) nao capturado(s) (Flow demorou demais)');
+            _extendDownloadQueue = [];
         }
-    }, 30000);
+        if (_extendDownloadListener) _removeExtendDownloadListener();
+    }, 8 * 60 * 1000); // 8 min por download na fila
 }
 
 function _removeExtendDownloadListener() {
@@ -2377,5 +2391,4 @@ function _removeExtendDownloadListener() {
         clearTimeout(_extendDownloadTimeoutId);
         _extendDownloadTimeoutId = null;
     }
-    _extendPendingDownload = null;
 }
