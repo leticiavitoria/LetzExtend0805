@@ -2305,6 +2305,9 @@ function handleSceneUpdate(data) {
     if (data.currentMediaId) sc.currentMediaId = data.currentMediaId;
     if (data.finalMediaId) sc.finalMediaId = data.finalMediaId;
     if (data.errorReason) sc.errorReason = data.errorReason;
+    // Tracking de progresso para retomada
+    if (data.lastSuccessMediaId) sc.lastSuccessMediaId = data.lastSuccessMediaId;
+    if (data.lastSuccessExtIdx !== undefined) sc.lastSuccessExtIdx = data.lastSuccessExtIdx;
     displayScenes();
     updateExtendStats();
 }
@@ -2334,13 +2337,14 @@ async function retryFailedScenes() {
         return;
     }
 
-    // Reset status das cenas falhas para que sejam re-executadas
+    // Reset status mas PRESERVA lastSuccess para resume
     for (const s of failed) {
         s.status = "waiting";
         s.currentExtIdx = -1;
         s.currentMediaId = null;
         s.finalMediaId = null;
         s.errorReason = null;
+        // s.lastSuccessMediaId e s.lastSuccessExtIdx ficam intactos
     }
     displayScenes();
     updateExtendStats();
@@ -2350,7 +2354,8 @@ async function retryFailedScenes() {
     el("extend", "startBtn").classList.add("hidden");
     el("extend", "stopBtn").classList.remove("hidden");
     updateBlockedOverlay();
-    updateStatus("running", "Reenviando " + failed.length + " cena(s) que falharam...");
+    const resumeCount = failed.filter(s => s.lastSuccessMediaId).length;
+    updateStatus("running", "Reenviando " + failed.length + " cena(s) — " + resumeCount + " serao retomadas do ponto que pararam");
 
     try {
         await chrome.runtime.sendMessage({
@@ -2359,7 +2364,9 @@ async function retryFailedScenes() {
                 number: s.number,
                 elements: s.elements || [],
                 base: s.base,
-                extensions: s.extensions || []
+                extensions: s.extensions || [],
+                resumeFromMediaId: s.lastSuccessMediaId || null,
+                resumeFromExtIdx: (typeof s.lastSuccessExtIdx === 'number') ? s.lastSuccessExtIdx : -1
             })),
             folder: tabState.extend.folder || "LetzScenes",
             useLite: st.useLite !== false
