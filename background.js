@@ -2321,16 +2321,23 @@ async function _finalizeScene(scene) {
 }
 
 // ============================================================
-// EXTEND — intercept de download nativo do Flow
-// Fila FIFO de downloads pendentes — varios podem estar enfileirados
-// quando Flow demora a concatenar videos longos (8 EXTs = 64s podem
-// levar varios minutos para serem servidos). Timeout estendido (8 min
-// por download) e quando a fila esvazia, o listener e removido para
-// nao interferir com downloads das outras abas (Video/Frame/Imagem).
+// EXTEND — intercept de download nativo do Flow (cross-platform)
+// Estrategia: onCreated + cancel + re-download com filename proprio.
+// Motivo: onDeterminingFilename nao dispara/aplica em algumas builds
+// do Chrome no macOS quando o download vem de <a download> com
+// Content-Disposition. onCreated dispara de forma consistente em todas
+// as plataformas e podemos cancelar antes dos bytes serem escritos e
+// re-disparar via chrome.downloads.download({filename, saveAs:false}),
+// que ignora tambem o setting "Ask where to save" do Chrome.
+//
+// Fila FIFO para varios downloads pendentes (cenas longas do Flow
+// levam varios minutos para concatenar). Listener registrado JIT e
+// removido quando fila esvazia, para nao interferir nas outras abas.
 // ============================================================
 let _extendDownloadQueue = []; // FIFO: [{sceneNumber, folder, totalSeconds, startedAt}, ...]
 let _extendDownloadListener = null;
 let _extendDownloadTimeoutId = null;
+let _extendOurDownloadIds = new Set(); // IDs criados por nos (skip para evitar loop)
 
 function _installExtendDownloadListener(pending) {
     _extendDownloadQueue.push(pending);
@@ -2339,32 +2346,75 @@ function _installExtendDownloadListener(pending) {
     _resetExtendDownloadTimeout();
     if (_extendDownloadListener) return; // ja instalado, fila ja atende
 
-    _extendDownloadListener = function (item, suggest) {
+    _extendDownloadListener = async function (item) {
         try {
-            if (!_extendDownloadQueue.length) {
-                _removeExtendDownloadListener();
+            // Ignorar nossos proprios re-downloads (evita loop infinito)
+            if (_extendOurDownloadIds.has(item.id)) {
+                _extendOurDownloadIds.delete(item.id);
                 return;
             }
+            if (!_extendDownloadQueue.length) return;
+
+            // Filtrar: so interceptar videos (mp4/webm/mov)
+            const url = item.finalUrl || item.url || '';
+            const fname = item.filename || '';
+            const mime = item.mime || '';
+            const isVideo = /^video\//i.test(mime) ||
+                /\.(mp4|webm|mov|m4v)($|\?)/i.test(url) ||
+                /\.(mp4|webm|mov|m4v)$/i.test(fname);
+            if (!isVideo) {
+                console.log('[Extend] onCreated ignorado (nao-video): mime=' + mime + ' fname=' + fname);
+                return;
+            }
+
             const next = _extendDownloadQueue.shift();
-            const ext = ((item.filename || '').match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
+            const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
             const newName = (next.folder || 'LetzScenes') + '/' +
                 'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
                 '_' + next.totalSeconds + 's.' + ext;
-            console.log('[Extend] renomeando download:', item.filename, '->', newName,
-                '(restam=' + _extendDownloadQueue.length + ')');
-            suggest({ filename: newName, conflictAction: 'uniquify' });
+
+            console.log('[Extend] cancelando download nativo id=' + item.id +
+                ' url=' + url.substring(0, 80));
+            try {
+                await new Promise((resolve) => chrome.downloads.cancel(item.id, () => resolve()));
+                await new Promise((resolve) => chrome.downloads.erase({ id: item.id }, () => resolve()));
+            } catch (e) {
+                console.warn('[Extend] cancel/erase falhou:', e.message);
+            }
+
+            let newId;
+            try {
+                newId = await new Promise((resolve, reject) => {
+                    chrome.downloads.download({
+                        url: url,
+                        filename: newName,
+                        conflictAction: 'uniquify',
+                        saveAs: false
+                    }, (id) => {
+                        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                        else resolve(id);
+                    });
+                });
+                if (newId) _extendOurDownloadIds.add(newId);
+                console.log('[Extend] re-download disparado: ' + newName +
+                    ' (id=' + newId + ', restam=' + _extendDownloadQueue.length + ')');
+            } catch (e) {
+                console.error('[Extend] re-download falhou:', e.message,
+                    '(URL pode ter expirado ou ser blob:)');
+            }
+
             if (_extendDownloadQueue.length === 0) {
                 _removeExtendDownloadListener();
             } else {
                 _resetExtendDownloadTimeout();
             }
         } catch (e) {
-            console.error('[Extend] onDeterminingFilename erro:', e.message);
+            console.error('[Extend] onCreated hook erro:', e.message);
         }
     };
     try {
-        chrome.downloads.onDeterminingFilename.addListener(_extendDownloadListener);
-        console.log('[Extend] download listener instalado (fila=' + _extendDownloadQueue.length + ')');
+        chrome.downloads.onCreated.addListener(_extendDownloadListener);
+        console.log('[Extend] download listener (onCreated) instalado (fila=' + _extendDownloadQueue.length + ')');
     } catch (e) {
         console.error('[Extend] addListener falhou:', e.message);
     }
@@ -2384,11 +2434,12 @@ function _resetExtendDownloadTimeout() {
 
 function _removeExtendDownloadListener() {
     if (_extendDownloadListener) {
-        try { chrome.downloads.onDeterminingFilename.removeListener(_extendDownloadListener); } catch (e) {}
+        try { chrome.downloads.onCreated.removeListener(_extendDownloadListener); } catch (e) {}
         _extendDownloadListener = null;
     }
     if (_extendDownloadTimeoutId) {
         clearTimeout(_extendDownloadTimeoutId);
         _extendDownloadTimeoutId = null;
     }
+    _extendOurDownloadIds.clear();
 }
