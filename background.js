@@ -309,6 +309,36 @@ function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
 }
 
+// Cache do URL resolvido (evita HEAD duplicado para o mesmo redirect)
+const _resolvedRedirectCache = new Map();
+
+// Resolve redirects (ex.: getMediaUrlRedirect -> URL final do CDN Google) antes
+// de passar pro chrome.downloads.download. Motivo: no macOS o Chrome respeita
+// o Content-Disposition do URL FINAL apos redirect, ignorando o filename da API.
+// Ao entregar o URL final direto, o filename da API vale em todas as plataformas.
+async function _resolveDownloadRedirect(url) {
+    if (!url) return url;
+    // Se ja e o URL final (nao passa por endpoint de redirect conhecido), retorna direto.
+    const needsResolve = /getMediaUrlRedirect|\/redirect\?/i.test(url);
+    if (!needsResolve) return url;
+    // Cache — mesmo URL costuma ser pedido varias vezes na fila
+    if (_resolvedRedirectCache.has(url)) return _resolvedRedirectCache.get(url);
+    try {
+        const response = await fetch(url, { method: 'HEAD', redirect: 'follow', credentials: 'include' });
+        const finalUrl = response.url && response.url !== url ? response.url : url;
+        _resolvedRedirectCache.set(url, finalUrl);
+        // Limitar tamanho do cache
+        if (_resolvedRedirectCache.size > 500) {
+            const firstKey = _resolvedRedirectCache.keys().next().value;
+            _resolvedRedirectCache.delete(firstKey);
+        }
+        return finalUrl;
+    } catch (e) {
+        console.warn('[Dotti] Redirect resolve falhou, usando URL original:', e.message);
+        return url;
+    }
+}
+
 // ============================================
 // CHROME DEBUGGER — clicks com isTrusted=true (bypass antibot)
 // ============================================
@@ -1828,13 +1858,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (!url) { sendResponse({ success: false, error: "no_url" }); break; }
                     const fullPath = folder ? folder + "/" + filename : filename;
                     try {
+                        // Resolver redirect antes de baixar. No macOS o Chrome
+                        // prefere o Content-Disposition do URL FINAL (CDN) sobre
+                        // o filename passado a API quando ha redirect. Fetch HEAD
+                        // segue o redirect no service worker, e depois passamos o
+                        // URL final direto pro downloads API — sem redirect no
+                        // caminho, o filename da API vale.
+                        const resolvedUrl = await _resolveDownloadRedirect(url);
                         const downloadId = await chrome.downloads.download({
-                            url: url,
+                            url: resolvedUrl,
                             filename: fullPath,
                             conflictAction: "uniquify",
                             saveAs: false
                         });
-                        console.log("[Dotti] Download video started:", downloadId, fullPath);
+                        console.log("[Dotti] Download video started:", downloadId, fullPath,
+                            resolvedUrl !== url ? "(redirect resolvido)" : "");
                         sendResponse({ success: true, downloadId });
                     } catch (e) {
                         console.error("[Dotti] Download video error:", e);
@@ -1848,13 +1886,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (!url) { sendResponse({ success: false, error: "no_url" }); break; }
                     const fullPath = folder ? folder + "/" + filename : filename;
                     try {
+                        const resolvedUrl = await _resolveDownloadRedirect(url);
                         const downloadId = await chrome.downloads.download({
-                            url: url,
+                            url: resolvedUrl,
                             filename: fullPath,
                             conflictAction: "uniquify",
                             saveAs: false
                         });
-                        console.log("[Dotti] Download image started:", downloadId, fullPath);
+                        console.log("[Dotti] Download image started:", downloadId, fullPath,
+                            resolvedUrl !== url ? "(redirect resolvido)" : "");
                         sendResponse({ success: true, downloadId });
                     } catch (e) {
                         console.error("[Dotti] Download image error:", e);
