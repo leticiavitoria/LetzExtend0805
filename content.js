@@ -3214,7 +3214,14 @@
         // === SCAN DE VIDEOS (4 prioridades identicas DarkPlanner) ===
 
         const groups = findAndGroupNewVideos();
-        if (groups.length === 0) return;
+        if (groups.length === 0) {
+            // v3.4.1: findAndGroupNewVideos depende de <video> com
+            // getMediaUrlRedirect no src, que no DOM Angular e SEMPRE zero.
+            // O fallback por tiles tem que rodar AQUI: na v3.4.0 ele estava no
+            // fim da funcao, depois deste return, e nunca executou.
+            await _scanTilesParaDownload();
+            return;
+        }
 
         console.log('[Dotti Scanner]', groups.length, 'novo(s) video(s) no DOM');
 
@@ -3410,14 +3417,6 @@
         if (downloadsToQueue.length > 0) {
             await _processDownloadQueue(downloadsToQueue);
         }
-
-        // v3.4.0: fallback pro DOM Angular. A varredura acima depende de
-        // <video> com getMediaUrlRedirect no src, que nao existe mais — um
-        // projeto com 18 videos tem zero <video>. Quando ela nao acha nada,
-        // cai pro caminho dos tiles + menu nativo.
-        if (downloadsToQueue.length === 0) {
-            await _scanTilesParaDownload();
-        }
     }
 
     // Tiles ja baixados nesta sessao, por aria-label (o tile nao tem id de
@@ -3425,8 +3424,53 @@
     // traz o prompt truncado).
     const _tilesBaixados = new Set();
 
+    let _avisouAutoDownloadOff = false;
+
+    // Quantos caracteres iniciais os dois textos tem em comum
+    function _prefixoComum(a, b) {
+        let i = 0;
+        while (i < a.length && i < b.length && a[i] === b[i]) i++;
+        return i;
+    }
+
+    // Casa o tile com o prompt pelo inicio do texto — o aria-label vem
+    // truncado com reticencias, entao a comparacao e por prefixo.
+    // NAO usar .find(): quando varios prompts compartilham os primeiros 30
+    // caracteres ele devolve o primeiro da lista, que pode ser um ja baixado.
+    // Testado: com dois prompts "Aerial drone shot over the city at ..." o
+    // .find() pegava o #1 (concluido) em vez do #2 (o do tile).
+    function _casarTileComPrompt(rotulo) {
+        const base = rotulo.replace(/[.…]+$/, "").trim().toLowerCase();
+        if (base.length <= 10) return null;
+        const chave = base.substring(0, 30);
+
+        const candidatos = _promptList.filter(p => {
+            const t = (p.text || "").trim().toLowerCase();
+            return t && t.startsWith(chave);
+        });
+        if (!candidatos.length) return null;
+
+        // Prefere quem ainda falta baixar; se todos ja completaram, usa todos
+        const pendentes = candidatos.filter(p =>
+            (p.foundVideos || 0) < (p.expectedVideos || 1));
+        const pool = pendentes.length ? pendentes : candidatos;
+
+        // Desempate: prefixo comum mais longo com o rotulo
+        return pool.slice().sort((a, b) =>
+            _prefixoComum((b.text || "").toLowerCase(), base) -
+            _prefixoComum((a.text || "").toLowerCase(), base)
+        )[0];
+    }
+
     async function _scanTilesParaDownload() {
-        if (!_autoDownload) return;
+        if (!_autoDownload) {
+            // Nao retornar calado: foi o silencio que escondeu a falha antes.
+            if (!_avisouAutoDownloadOff) {
+                console.log('[Dotti Scanner] autoDownload desligado — nao vou baixar');
+                _avisouAutoDownloadOff = true;
+            }
+            return;
+        }
 
         const tiles = _tilesProntos();
         if (!tiles.length) {
@@ -3440,13 +3484,7 @@
             const rotulo = (tile.getAttribute("aria-label") || "").trim();
             if (!rotulo || _tilesBaixados.has(rotulo)) continue;
 
-            // Casa o tile com o prompt pelo inicio do texto — o aria-label vem
-            // truncado com reticencias, entao a comparacao e por prefixo.
-            const base = rotulo.replace(/[.…]+$/, "").trim().toLowerCase();
-            const prompt = _promptList.find(p => {
-                const t = (p.text || "").trim().toLowerCase();
-                return t && base.length > 10 && t.startsWith(base.substring(0, 30));
-            });
+            const prompt = _casarTileComPrompt(rotulo);
 
             if (!prompt) {
                 console.log('[Dotti Scanner] Tile sem prompt correspondente:', rotulo.substring(0, 50));
