@@ -210,15 +210,33 @@
             log("Nenhum menu abriu. O clique sintetico pode nao bastar aqui —");
             log("abra o menu na mao e rode o script de novo.");
         } else {
-            // Se ha submenu (ex.: 'Video completo' -> resolucoes), tenta abrir
+            // Abrir o submenu de resolucoes.
+            // ATENCAO: NAO procurar por aria-haspopup="menu" — dois itens tem
+            // esse atributo e "Adicionar ao cenario" vem ANTES do download na
+            // ordem do menu, entao o criterio antigo abria o submenu errado
+            // ("Nova cena"). O identificador confiavel e o ICONE `download`;
+            // o texto ("Fazer o download") vem traduzido e nao serve de ancora.
             log("");
-            log("Procurando item que abre SUBMENU (resolucoes)...");
-            const subTrigger = Array.from(document.querySelectorAll(
-                "div.mat-mdc-menu-content [role='menuitem'], .mat-mdc-menu-panel [role='menuitem']"))
-                .find(it => it.getAttribute("aria-haspopup") === "menu" ||
-                    /completo|complete|download|baixar/i.test(it.innerText || ""));
+            log("Procurando o item de download pelo ICONE 'download'...");
+            const menuItens = Array.from(document.querySelectorAll("[role='menuitem']"));
+            // Dedup: o mesmo menu aparece em 3 containers aninhados
+            // (cdk-overlay-pane > mat-mdc-menu-panel > mat-mdc-menu-content).
+            const vistos = new Set();
+            const unicos = menuItens.filter(it => {
+                const chave = (it.innerText || "").trim();
+                if (vistos.has(chave)) return false;
+                vistos.add(chave);
+                return true;
+            });
+            log(`   ${menuItens.length} itens no DOM, ${unicos.length} unicos apos dedup`);
+
+            const subTrigger = unicos.find(it => {
+                const ic = it.querySelector("mat-icon");
+                return ic && ic.textContent.trim() === "download";
+            }) || unicos.find(it => /download|baixar/i.test(it.innerText || ""));
+
             if (!subTrigger) {
-                log("   Nenhum item com submenu — o download deve ser direto.");
+                log("   Item de download NAO encontrado.");
                 entregar();
                 return;
             }
@@ -227,9 +245,9 @@
             clicar(subTrigger);
             setTimeout(() => {
                 log("");
-                dumpMenus("SUBMENU (aqui devem estar as resolucoes)");
+                dumpMenus("SUBMENU DE RESOLUCOES");
                 entregar();
-            }, 1000);
+            }, 1400);
             return;
         }
         entregar();
