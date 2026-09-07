@@ -1155,7 +1155,9 @@ async function initApp() {
     const tabInfo = await chrome.runtime.sendMessage({ action: "GET_ACTIVE_TAB" });
     currentTabId = tabInfo.tabId;
 
-    if (!tabInfo.url || (!tabInfo.url.includes("labs.google/flow") && !tabInfo.url.includes("labs.google/fx"))) {
+    // v3.3.0: o Flow migrou pra flow.google.com; labs.google/fx fica como
+    // fallback enquanto a URL antiga ainda redirecionar.
+    if (!tabInfo.url || (!tabInfo.url.includes("flow.google.com") && !tabInfo.url.includes("labs.google/fx"))) {
         updateStatus("error", "Abra o Veo 3 Flow primeiro!");
         el("video", "processBtn").disabled = true;
         el("image", "processBtn").disabled = true;

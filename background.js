@@ -8,6 +8,24 @@ const CONFIG = {
     debug: false
 };
 
+// ============================================
+// FLOW — DOMINIO
+// ============================================
+// v3.3.0: o Flow saiu de labs.google/fx/tools/flow para flow.google.com.
+// Confirmado no navegador da usuaria:
+//   href   : https://flow.google.com/project/<uuid>
+//   origin : https://flow.google.com
+// Por isso o content script parou de ser injetado: o manifest so casava
+// https://labs.google/*. labs.google fica na lista como fallback enquanto
+// a URL antiga ainda redirecionar.
+const FLOW_URL = "https://flow.google.com/";
+const FLOW_HOSTS = ["flow.google.com", "labs.google"];
+
+function isFlowUrl(url) {
+    if (!url) return false;
+    return FLOW_HOSTS.some(h => url.includes(h));
+}
+
 const WINDOW_SIZES = {
     mini: { width: 420, height: 320 },
     normal: { width: 1200, height: 800 }
@@ -77,7 +95,7 @@ async function openVeoWindow(mini = true) {
         const displays = await chrome.system.display.getInfo();
         const pd = displays[0];
         win = await chrome.windows.create({
-            url: "https://labs.google/fx/tools/flow",
+            url: FLOW_URL,
             type: "popup",
             width: size.width,
             height: size.height,
@@ -88,7 +106,7 @@ async function openVeoWindow(mini = true) {
         isWindowMini = true;
     } else {
         win = await chrome.windows.create({
-            url: "https://labs.google/fx/tools/flow",
+            url: FLOW_URL,
             type: "popup",
             state: "maximized",
             focused: true
@@ -1586,7 +1604,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     try {
                                         const tabs = await chrome.tabs.query({ url: ['*://dottiflow.com.br/*'] });
                                         if (tabs.length > 0) {
-                                            await chrome.tabs.update(tabs[0].id, { url: 'https://labs.google/fx/tools/flow' });
+                                            await chrome.tabs.update(tabs[0].id, { url: FLOW_URL });
                                             targetTabId = tabs[0].id;
 
                                             // Esperar pagina carregar (5s) e enviar RESUME
@@ -1704,7 +1722,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                         let [url, options] = args;
                                         const cnt = window.__dottiOutputCount;
                                         if (cnt > 1 && options?.body && typeof url === 'string' &&
-                                            (url.includes('aisandbox-pa.googleapis.com') || url.includes('generativelanguage') || url.includes('labs.google'))) {
+                                            (url.includes('aisandbox-pa.googleapis.com') || url.includes('generativelanguage') || isFlowUrl(url))) {
                                             try {
                                                 const bodyStr = typeof options.body === 'string' ? options.body : null;
                                                 if (bodyStr && bodyStr.startsWith('{')) {
@@ -1758,7 +1776,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                         const cnt = window.__dottiOutputCount;
                                         if (cnt > 1 && body && typeof body === 'string' && body.startsWith('{')) {
                                             const url = this._dottiUrl || '';
-                                            if (url.includes('aisandbox-pa.googleapis.com') || url.includes('generativelanguage') || url.includes('labs.google')) {
+                                            if (url.includes('aisandbox-pa.googleapis.com') || url.includes('generativelanguage') || isFlowUrl(url)) {
                                                 try {
                                                     const parsed = JSON.parse(body);
                                                     let modified = false;
@@ -1932,7 +1950,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                 case "GET_ACTIVE_TAB":
                     if (targetTabId) {
-                        sendResponse({ tabId: targetTabId, url: "https://labs.google/fx/tools/flow" });
+                        sendResponse({ tabId: targetTabId, url: FLOW_URL });
                     } else {
                         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                         sendResponse({ tabId: tab?.id, url: tab?.url });
@@ -2079,14 +2097,17 @@ chrome.action.onClicked.addListener(async () => {
 chrome.runtime.onInstalled.addListener(async () => {
     await _bootPromise;
 
-    try {
-        await chrome.contentSettings.automaticDownloads.set({
-            primaryPattern: 'https://labs.google/*',
-            setting: 'allow'
-        });
-        console.log("[Dotti] Downloads automaticos permitidos para labs.google");
-    } catch (e) {
-        console.log("[Dotti] Nao foi possivel configurar downloads automaticos:", e.message);
+    // v3.3.0: liberar nos dois dominios — o Flow migrou pra flow.google.com
+    for (const padrao of ['https://flow.google.com/*', 'https://labs.google/*']) {
+        try {
+            await chrome.contentSettings.automaticDownloads.set({
+                primaryPattern: padrao,
+                setting: 'allow'
+            });
+            console.log("[Dotti] Downloads automaticos permitidos para", padrao);
+        } catch (e) {
+            console.log("[Dotti] Nao foi possivel configurar downloads automaticos em", padrao, e.message);
+        }
     }
 });
 

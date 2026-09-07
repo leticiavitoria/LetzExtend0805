@@ -18,6 +18,7 @@
   ],
 
   "host_permissions": [
+    "https://flow.google.com/*",
     "https://labs.google/*",
     "https://*.googleapis.com/*",
     "https://*.googleusercontent.com/*",
@@ -44,7 +45,7 @@
 
   "content_scripts": [
     {
-      "matches": ["https://labs.google/*"],
+      "matches": ["https://flow.google.com/*", "https://labs.google/*"],
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
@@ -54,7 +55,7 @@
   "web_accessible_resources": [
     {
       "resources": ["panel.html", "panel.js", "panel.css", "interceptor.js", "slate-helper.js", "icons/*"],
-      "matches": ["https://labs.google/*"]
+      "matches": ["https://flow.google.com/*", "https://labs.google/*"]
     }
   ],
 
