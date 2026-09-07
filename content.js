@@ -3426,40 +3426,75 @@
 
     let _avisouAutoDownloadOff = false;
 
-    // Quantos caracteres iniciais os dois textos tem em comum
-    function _prefixoComum(a, b) {
-        let i = 0;
-        while (i < a.length && i < b.length && a[i] === b[i]) i++;
-        return i;
+    // Palavras sem valor discriminante — saem antes de pontuar
+    const _STOPWORDS = new Set(['a', 'an', 'the', 'of', 'on', 'in', 'at', 'to', 'over',
+        'through', 'with', 'and', 'from', 'into', 'toward', 'by', 'for', 'que', 'com',
+        'para', 'por', 'uma', 'dos', 'das', 'nos', 'nas']);
+
+    function _tokens(s) {
+        return String(s || "").toLowerCase()
+            .normalize("NFD").replace(/[̀-ͯ]/g, "")   // tira acentos
+            .replace(/[^a-z0-9\s]/g, " ")
+            .split(/\s+/)
+            .filter(t => t.length > 2 && !_STOPWORDS.has(t));
     }
 
-    // Casa o tile com o prompt pelo inicio do texto — o aria-label vem
-    // truncado com reticencias, entao a comparacao e por prefixo.
-    // NAO usar .find(): quando varios prompts compartilham os primeiros 30
-    // caracteres ele devolve o primeiro da lista, que pode ser um ja baixado.
-    // Testado: com dois prompts "Aerial drone shot over the city at ..." o
-    // .find() pegava o #1 (concluido) em vez do #2 (o do tile).
-    function _casarTileComPrompt(rotulo) {
-        const base = rotulo.replace(/[.…]+$/, "").trim().toLowerCase();
-        if (base.length <= 10) return null;
-        const chave = base.substring(0, 30);
+    // Quanto do titulo do tile aparece no texto do prompt (0 a 1).
+    function _scoreTituloNoPrompt(titulo, texto) {
+        const truncado = /[.…]$/.test(String(titulo).trim());
+        const tt = _tokens(titulo);
+        if (!tt.length) return 0;
+        const alvo = " " + _tokens(texto).join(" ") + " ";
+        let achou = 0;
+        for (let i = 0; i < tt.length; i++) {
+            const ultimo = i === tt.length - 1;
+            // Titulo cortado com "…": o ultimo token pode estar pela metade
+            // ("ston…" -> "stone"), entao ali casa por prefixo.
+            const bate = (truncado && ultimo)
+                ? alvo.includes(" " + tt[i])
+                : alvo.includes(" " + tt[i] + " ");
+            if (bate) achou++;
+        }
+        return achou / tt.length;
+    }
 
-        const candidatos = _promptList.filter(p => {
-            const t = (p.text || "").trim().toLowerCase();
-            return t && t.startsWith(chave);
-        });
-        if (!candidatos.length) return null;
+    const _SCORE_MINIMO = 0.6;
+
+    // v3.4.2: o aria-label do tile NAO e o prompt truncado — e um titulo curto
+    // que o proprio Flow gera a partir do conteudo. Confirmado no log dela:
+    // titulo "Drone banking over volcanic lake" para o prompt
+    // "...Extreme wide aerial drone banking over volcanic CRATER lake...".
+    // As palavras aparecem no MEIO do texto e nem contiguas, entao comparar
+    // por prefixo (como fazia antes) nunca casava nada. Agora e sobreposicao
+    // de palavras.
+    function _casarTileComPrompt(rotulo) {
+        if (!rotulo || rotulo.trim().length <= 5) return null;
+
+        const notas = _promptList
+            .map(p => ({ p: p, s: _scoreTituloNoPrompt(rotulo, p.text || "") }))
+            .filter(n => n.s >= _SCORE_MINIMO);
+
+        if (!notas.length) {
+            // Loga o melhor score mesmo assim: se voltar a falhar, o proximo
+            // diagnostico ja vem com o numero em vez de so "nao casou".
+            let melhor = 0;
+            for (const p of _promptList) {
+                const s = _scoreTituloNoPrompt(rotulo, p.text || "");
+                if (s > melhor) melhor = s;
+            }
+            console.log('[Dotti Scanner] Sem match (melhor score ' +
+                melhor.toFixed(2) + ', minimo ' + _SCORE_MINIMO + '):',
+                rotulo.substring(0, 50));
+            return null;
+        }
 
         // Prefere quem ainda falta baixar; se todos ja completaram, usa todos
-        const pendentes = candidatos.filter(p =>
-            (p.foundVideos || 0) < (p.expectedVideos || 1));
-        const pool = pendentes.length ? pendentes : candidatos;
+        const pendentes = notas.filter(n =>
+            (n.p.foundVideos || 0) < (n.p.expectedVideos || 1));
+        const pool = pendentes.length ? pendentes : notas;
 
-        // Desempate: prefixo comum mais longo com o rotulo
-        return pool.slice().sort((a, b) =>
-            _prefixoComum((b.text || "").toLowerCase(), base) -
-            _prefixoComum((a.text || "").toLowerCase(), base)
-        )[0];
+        pool.sort((a, b) => b.s - a.s);
+        return pool[0].p;
     }
 
     async function _scanTilesParaDownload() {
@@ -3486,10 +3521,7 @@
 
             const prompt = _casarTileComPrompt(rotulo);
 
-            if (!prompt) {
-                console.log('[Dotti Scanner] Tile sem prompt correspondente:', rotulo.substring(0, 50));
-                continue;
-            }
+            if (!prompt) continue; // _casarTileComPrompt ja logou o motivo
 
             const filename = _nomeArquivoDoPrompt(prompt, prompt.foundVideos + 1);
             console.log('[Dotti Scanner] Baixando tile #' + prompt.number + ' -> ' + filename);
