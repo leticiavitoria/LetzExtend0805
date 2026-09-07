@@ -309,6 +309,36 @@ function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
 }
 
+// Cache do URL resolvido (evita HEAD duplicado para o mesmo redirect)
+const _resolvedRedirectCache = new Map();
+
+// Resolve redirects (ex.: getMediaUrlRedirect -> URL final do CDN Google) antes
+// de passar pro chrome.downloads.download. Motivo: no macOS o Chrome respeita
+// o Content-Disposition do URL FINAL apos redirect, ignorando o filename da API.
+// Ao entregar o URL final direto, o filename da API vale em todas as plataformas.
+async function _resolveDownloadRedirect(url) {
+    if (!url) return url;
+    // Se ja e o URL final (nao passa por endpoint de redirect conhecido), retorna direto.
+    const needsResolve = /getMediaUrlRedirect|\/redirect\?/i.test(url);
+    if (!needsResolve) return url;
+    // Cache — mesmo URL costuma ser pedido varias vezes na fila
+    if (_resolvedRedirectCache.has(url)) return _resolvedRedirectCache.get(url);
+    try {
+        const response = await fetch(url, { method: 'HEAD', redirect: 'follow', credentials: 'include' });
+        const finalUrl = response.url && response.url !== url ? response.url : url;
+        _resolvedRedirectCache.set(url, finalUrl);
+        // Limitar tamanho do cache
+        if (_resolvedRedirectCache.size > 500) {
+            const firstKey = _resolvedRedirectCache.keys().next().value;
+            _resolvedRedirectCache.delete(firstKey);
+        }
+        return finalUrl;
+    } catch (e) {
+        console.warn('[Dotti] Redirect resolve falhou, usando URL original:', e.message);
+        return url;
+    }
+}
+
 // ============================================
 // CHROME DEBUGGER — clicks com isTrusted=true (bypass antibot)
 // ============================================
@@ -1828,13 +1858,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (!url) { sendResponse({ success: false, error: "no_url" }); break; }
                     const fullPath = folder ? folder + "/" + filename : filename;
                     try {
+                        // Resolver redirect antes de baixar. No macOS o Chrome
+                        // prefere o Content-Disposition do URL FINAL (CDN) sobre
+                        // o filename passado a API quando ha redirect. Fetch HEAD
+                        // segue o redirect no service worker, e depois passamos o
+                        // URL final direto pro downloads API — sem redirect no
+                        // caminho, o filename da API vale.
+                        const resolvedUrl = await _resolveDownloadRedirect(url);
                         const downloadId = await chrome.downloads.download({
-                            url: url,
+                            url: resolvedUrl,
                             filename: fullPath,
                             conflictAction: "uniquify",
                             saveAs: false
                         });
-                        console.log("[Dotti] Download video started:", downloadId, fullPath);
+                        console.log("[Dotti] Download video started:", downloadId, fullPath,
+                            resolvedUrl !== url ? "(redirect resolvido)" : "");
                         sendResponse({ success: true, downloadId });
                     } catch (e) {
                         console.error("[Dotti] Download video error:", e);
@@ -1848,13 +1886,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (!url) { sendResponse({ success: false, error: "no_url" }); break; }
                     const fullPath = folder ? folder + "/" + filename : filename;
                     try {
+                        const resolvedUrl = await _resolveDownloadRedirect(url);
                         const downloadId = await chrome.downloads.download({
-                            url: url,
+                            url: resolvedUrl,
                             filename: fullPath,
                             conflictAction: "uniquify",
                             saveAs: false
                         });
-                        console.log("[Dotti] Download image started:", downloadId, fullPath);
+                        console.log("[Dotti] Download image started:", downloadId, fullPath,
+                            resolvedUrl !== url ? "(redirect resolvido)" : "");
                         sendResponse({ success: true, downloadId });
                     } catch (e) {
                         console.error("[Dotti] Download image error:", e);
@@ -1997,6 +2037,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     sendResponse({ success: true });
                     break;
 
+                case "EXTEND_EXPECT_NATIVE_DOWNLOAD":
+                    _installExtendDownloadListener({
+                        sceneNumber: message.sceneNumber,
+                        folder: message.folder || 'LetzScenes',
+                        totalSeconds: message.totalSeconds,
+                        startedAt: Date.now()
+                    });
+                    console.log('[Extend] aguardando download nativo SCENE', message.sceneNumber);
+                    sendResponse({ success: true });
+                    break;
+
                 default:
                     sendResponse({ error: "Unknown action" });
             }
@@ -2090,7 +2141,13 @@ async function extendStartQueue(scenes, folder, useLite) {
             status: "waiting",
             currentExtIdx: -1,
             currentMediaId: null,
-            finalMediaId: null
+            finalMediaId: null,
+            // Tracking de progresso para resume:
+            lastSuccessMediaId: null,    // ultimo mediaId que terminou com COMPLETED (BASE ou EXT)
+            lastSuccessExtIdx: -1,       // -1 = BASE foi o ultimo success; 0+ = idx do ultimo EXT success
+            // Resume hints (vindos do retry):
+            resumeFromMediaId: s.resumeFromMediaId || null,
+            resumeFromExtIdx: (typeof s.resumeFromExtIdx === 'number') ? s.resumeFromExtIdx : -1
         })),
         folder: folder || "LetzScenes",
         useLite: useLite !== false,
@@ -2120,6 +2177,31 @@ async function extendNextScene() {
         return;
     }
     const scene = _extendQueue.scenes[_extendQueue.currentIdx];
+
+    // MODO RESUME: cena tem mediaId de progresso anterior — pula BASE e
+    // retoma a partir da proxima EXT depois de resumeFromExtIdx.
+    if (scene.resumeFromMediaId) {
+        const nextExtIdx = scene.resumeFromExtIdx + 1;
+        if (nextExtIdx >= scene.extensions.length) {
+            // Tudo ja foi feito — so falta o download
+            console.log("[Extend] resumindo SCENE", scene.number, "ja completa, indo direto p/ download");
+            scene.currentMediaId = scene.resumeFromMediaId;
+            scene.lastSuccessMediaId = scene.resumeFromMediaId;
+            scene.lastSuccessExtIdx = scene.resumeFromExtIdx;
+            _finalizeScene(scene);
+            return;
+        }
+        console.log("[Extend] RESUME SCENE", scene.number, "from EXT idx", nextExtIdx, "(media=" + scene.resumeFromMediaId.substring(0, 12) + ")");
+        scene.currentMediaId = scene.resumeFromMediaId;
+        scene.currentExtIdx = scene.resumeFromExtIdx; // _advanceExtension fara o ++
+        scene.lastSuccessMediaId = scene.resumeFromMediaId;
+        scene.lastSuccessExtIdx = scene.resumeFromExtIdx;
+        scene._forceReopenDetail = true; // sinaliza para a 1a chamada apos resume
+        _sceneUpdate(scene, { status: "extending", currentExtIdx: scene.currentExtIdx, currentMediaId: scene.currentMediaId });
+        _advanceExtension(scene);
+        return;
+    }
+
     console.log("[Extend] iniciando SCENE", scene.number);
     _sceneUpdate(scene, { status: "base_sent" });
 
@@ -2186,12 +2268,24 @@ function extendOnVideoStatus(updates) {
         if (u.status === "COMPLETED") {
             if (_extendActiveTimeout) { clearTimeout(_extendActiveTimeout); _extendActiveTimeout = null; }
             if (scene.status === "base_sent") {
-                _sceneUpdate(scene, { status: "base_generated" });
+                // BASE concluida — registra como ultimo success
+                scene.lastSuccessMediaId = scene.currentMediaId;
+                scene.lastSuccessExtIdx = -1;
+                _sceneUpdate(scene, {
+                    status: "base_generated",
+                    lastSuccessMediaId: scene.lastSuccessMediaId,
+                    lastSuccessExtIdx: -1
+                });
                 _advanceExtension(scene);
             } else if (scene.status === "extending") {
-                // EXT atual concluida
+                // EXT atual concluida — registra como ultimo success
+                scene.lastSuccessMediaId = scene.currentMediaId;
+                scene.lastSuccessExtIdx = scene.currentExtIdx;
+                _sceneUpdate(scene, {
+                    lastSuccessMediaId: scene.lastSuccessMediaId,
+                    lastSuccessExtIdx: scene.lastSuccessExtIdx
+                });
                 if (scene.currentExtIdx + 1 >= scene.extensions.length) {
-                    // ultima extensao -> finalizar
                     _finalizeScene(scene);
                 } else {
                     _advanceExtension(scene);
@@ -2217,11 +2311,14 @@ async function _advanceExtension(scene) {
     _sceneUpdate(scene, { status: "extending", currentExtIdx: scene.currentExtIdx });
     // Delay para Flow renderizar o thumb recem gerado / detalhe ficar acessivel
     await new Promise(r => setTimeout(r, scene.currentExtIdx === 0 ? 3500 : 1500));
+    const forceReopen = !!scene._forceReopenDetail;
+    scene._forceReopenDetail = false;
     try {
         await chrome.tabs.sendMessage(targetTabId, {
             action: "EXTEND_RUN_EXT",
             scene: {
                 number: scene.number,
+                forceReopenDetail: forceReopen,
                 extIdx: scene.currentExtIdx,
                 text: extText,
                 useLite: _extendQueue.useLite,
@@ -2261,4 +2358,128 @@ async function _finalizeScene(scene) {
         console.error("[Extend] EXTEND_DOWNLOAD erro:", e.message);
     }
     setTimeout(() => extendNextScene(), 2000);
+}
+
+// ============================================================
+// EXTEND — intercept de download nativo do Flow (cross-platform)
+// Estrategia: onCreated + cancel + re-download com filename proprio.
+// Motivo: onDeterminingFilename nao dispara/aplica em algumas builds
+// do Chrome no macOS quando o download vem de <a download> com
+// Content-Disposition. onCreated dispara de forma consistente em todas
+// as plataformas e podemos cancelar antes dos bytes serem escritos e
+// re-disparar via chrome.downloads.download({filename, saveAs:false}),
+// que ignora tambem o setting "Ask where to save" do Chrome.
+//
+// Fila FIFO para varios downloads pendentes (cenas longas do Flow
+// levam varios minutos para concatenar). Listener registrado JIT e
+// removido quando fila esvazia, para nao interferir nas outras abas.
+// ============================================================
+let _extendDownloadQueue = []; // FIFO: [{sceneNumber, folder, totalSeconds, startedAt}, ...]
+let _extendDownloadListener = null;
+let _extendDownloadTimeoutId = null;
+let _extendOurDownloadIds = new Set(); // IDs criados por nos (skip para evitar loop)
+
+function _installExtendDownloadListener(pending) {
+    _extendDownloadQueue.push(pending);
+    console.log('[Extend] download enfileirado: SCENE', pending.sceneNumber,
+        '(fila agora=' + _extendDownloadQueue.length + ')');
+    _resetExtendDownloadTimeout();
+    if (_extendDownloadListener) return; // ja instalado, fila ja atende
+
+    _extendDownloadListener = async function (item) {
+        try {
+            // Ignorar nossos proprios re-downloads (evita loop infinito)
+            if (_extendOurDownloadIds.has(item.id)) {
+                _extendOurDownloadIds.delete(item.id);
+                return;
+            }
+            if (!_extendDownloadQueue.length) return;
+
+            // Filtrar: so interceptar videos (mp4/webm/mov)
+            const url = item.finalUrl || item.url || '';
+            const fname = item.filename || '';
+            const mime = item.mime || '';
+            const isVideo = /^video\//i.test(mime) ||
+                /\.(mp4|webm|mov|m4v)($|\?)/i.test(url) ||
+                /\.(mp4|webm|mov|m4v)$/i.test(fname);
+            if (!isVideo) {
+                console.log('[Extend] onCreated ignorado (nao-video): mime=' + mime + ' fname=' + fname);
+                return;
+            }
+
+            const next = _extendDownloadQueue.shift();
+            const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
+            const newName = (next.folder || 'LetzScenes') + '/' +
+                'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
+                '_' + next.totalSeconds + 's.' + ext;
+
+            console.log('[Extend] cancelando download nativo id=' + item.id +
+                ' url=' + url.substring(0, 80));
+            try {
+                await new Promise((resolve) => chrome.downloads.cancel(item.id, () => resolve()));
+                await new Promise((resolve) => chrome.downloads.erase({ id: item.id }, () => resolve()));
+            } catch (e) {
+                console.warn('[Extend] cancel/erase falhou:', e.message);
+            }
+
+            let newId;
+            try {
+                newId = await new Promise((resolve, reject) => {
+                    chrome.downloads.download({
+                        url: url,
+                        filename: newName,
+                        conflictAction: 'uniquify',
+                        saveAs: false
+                    }, (id) => {
+                        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                        else resolve(id);
+                    });
+                });
+                if (newId) _extendOurDownloadIds.add(newId);
+                console.log('[Extend] re-download disparado: ' + newName +
+                    ' (id=' + newId + ', restam=' + _extendDownloadQueue.length + ')');
+            } catch (e) {
+                console.error('[Extend] re-download falhou:', e.message,
+                    '(URL pode ter expirado ou ser blob:)');
+            }
+
+            if (_extendDownloadQueue.length === 0) {
+                _removeExtendDownloadListener();
+            } else {
+                _resetExtendDownloadTimeout();
+            }
+        } catch (e) {
+            console.error('[Extend] onCreated hook erro:', e.message);
+        }
+    };
+    try {
+        chrome.downloads.onCreated.addListener(_extendDownloadListener);
+        console.log('[Extend] download listener (onCreated) instalado (fila=' + _extendDownloadQueue.length + ')');
+    } catch (e) {
+        console.error('[Extend] addListener falhou:', e.message);
+    }
+}
+
+function _resetExtendDownloadTimeout() {
+    if (_extendDownloadTimeoutId) clearTimeout(_extendDownloadTimeoutId);
+    _extendDownloadTimeoutId = setTimeout(() => {
+        if (_extendDownloadQueue.length > 0) {
+            console.warn('[Extend] timeout - descartando ' + _extendDownloadQueue.length +
+                ' download(s) nao capturado(s) (Flow demorou demais)');
+            _extendDownloadQueue = [];
+        }
+        if (_extendDownloadListener) _removeExtendDownloadListener();
+    }, 8 * 60 * 1000); // 8 min por download na fila
+}
+
+function _removeExtendDownloadListener() {
+    if (_extendDownloadListener) {
+        try { chrome.downloads.onCreated.removeListener(_extendDownloadListener); } catch (e) {}
+        _extendDownloadListener = null;
+    }
+    if (_extendDownloadTimeoutId) {
+        clearTimeout(_extendDownloadTimeoutId);
+        _extendDownloadTimeoutId = null;
+    }
+    _extendOurDownloadIds.clear();
 }

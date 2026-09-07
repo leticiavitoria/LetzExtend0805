@@ -4728,33 +4728,47 @@
         return null;
     }
 
+    function _isVisible(el) {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 1 || r.height <= 1) return false;
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+        if (parseFloat(cs.opacity || '1') === 0) return false;
+        return true;
+    }
+
+    function _allText(el) {
+        // Texto + aria-label + title, em minusculas, espacos colapsados
+        const t = (el.innerText || el.textContent || '') + ' ' +
+                  (el.getAttribute('aria-label') || '') + ' ' +
+                  (el.getAttribute('title') || '');
+        return t.toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+
     function _findEstenderButton() {
-        // Botao na barra inferior do detalhe: texto "» Estender" / "Extend" (com chevron unicode)
+        // CRITICO: NAO usar offsetParent (retorna null para position:fixed,
+        // que e o caso da barra inferior do detalhe do Flow).
         const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
         for (const b of candidates) {
-            if (b.offsetParent === null) continue;
-            const t = (b.textContent || '').toLowerCase().trim();
-            if (!t) continue;
-            // Word-boundary match — aceita "estender", "» estender", ">> estender", etc.
-            if (/\bestender\b/.test(t) || /\bextend\b/.test(t)) {
-                // Evitar matches falsos: limitar tamanho do texto (botao real e curto)
-                if (t.length <= 30) return b;
-            }
+            if (!_isVisible(b)) continue;
+            const t = _allText(b);
+            if (!t || t.length > 80) continue;
+            if (/\bestender\b/.test(t) || /\bextend\b/.test(t)) return b;
         }
         return null;
     }
 
     function _findModelDropdownTrigger() {
-        // Procura o trigger do dropdown de modelo: texto "Veo 3.1 ...", preferindo
-        // o que estiver perto do textbox (mesma row do submit).
         const tb = document.querySelector('[role="textbox"]');
-        const tbRect = tb ? tb.getBoundingClientRect() : null;
+        const tbRect = tb && _isVisible(tb) ? tb.getBoundingClientRect() : null;
         const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
         const matches = [];
         for (const b of candidates) {
-            if (b.offsetParent === null) continue;
-            const t = (b.textContent || '').trim();
-            if (/Veo\s*3\.1\b/i.test(t) && t.length < 80) {
+            if (!_isVisible(b)) continue;
+            const t = _allText(b);
+            if (!t || t.length > 80) continue;
+            if (/veo\s*3\.1\b/.test(t)) {
                 let dist = 99999;
                 if (tbRect) {
                     const r = b.getBoundingClientRect();
@@ -4770,21 +4784,19 @@
     }
 
     function _findLowerPriorityOption() {
-        // Procura o item do dropdown "Veo 3.1 - Lite [Lower Priority]"
-        // Aceita variacoes de espacamento/colchete.
-        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div[tabindex]', 'div[role]'];
+        const sels = ['[role="menuitem"]', '[role="option"]', 'li', 'button', 'div[tabindex]', 'div[role]', 'a'];
         const seen = new Set();
         for (const sel of sels) {
             const nodes = Array.from(document.querySelectorAll(sel));
             for (const n of nodes) {
                 if (seen.has(n)) continue;
                 seen.add(n);
-                if (n.offsetParent === null) continue;
-                const t = (n.textContent || '').trim();
-                if (t.length > 120) continue;
-                if (!/Lower\s*Priority/i.test(t)) continue;
-                if (!/Lite/i.test(t)) continue;
-                if (/Fast/i.test(t)) continue;
+                if (!_isVisible(n)) continue;
+                const t = _allText(n);
+                if (!t || t.length > 120) continue;
+                if (!/lower\s*priority/.test(t)) continue;
+                if (!/lite/.test(t)) continue;
+                if (/fast/.test(t)) continue;
                 console.log('[Extend] lowerPriorityOption MATCH:', t);
                 return n;
             }
@@ -4795,21 +4807,18 @@
     function _isLowerPrioritySelected() {
         const trigger = _findModelDropdownTrigger();
         if (!trigger) return false;
-        const t = (trigger.textContent || '').trim();
-        return /Lower\s*Priority/i.test(t) && /Lite/i.test(t) && !/Fast/i.test(t);
+        const t = _allText(trigger);
+        return /lower\s*priority/.test(t) && /lite/.test(t) && !/fast/.test(t);
     }
 
     function _findTextareaForExtend() {
-        // Slate textbox visivel; preferir o que tem placeholder "Qual e a proxima etapa"
         const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
         for (const t of tbs) {
-            if (t.offsetParent === null) continue;
+            if (!_isVisible(t)) continue;
             const ph = (t.getAttribute('aria-placeholder') || t.getAttribute('data-placeholder') || '').toLowerCase();
             if (ph.includes('proxima etapa') || ph.includes('próxima etapa') || ph.includes('next step')) return t;
         }
-        for (const t of tbs) {
-            if (t.offsetParent !== null) return t;
-        }
+        for (const t of tbs) { if (_isVisible(t)) return t; }
         return null;
     }
 
@@ -4817,7 +4826,6 @@
         if (!mediaId) return null;
         const frag = mediaId.split('/').pop().split(':').pop();
         if (!frag) return null;
-        // 1) <video> ou <img> cujo src contenha o fragmento
         const candidates = Array.from(document.querySelectorAll('video, img, source, [data-media-id], [data-id], [data-name]'));
         for (const c of candidates) {
             const src = c.src || c.getAttribute('src') || c.getAttribute('data-media-id') || c.getAttribute('data-id') || c.getAttribute('data-name') || '';
@@ -4831,17 +4839,15 @@
     }
 
     function _findMostRecentVideoThumb() {
-        // Fallback: pega o thumb de video mais recente (ultimo no DOM, em geral o ultimo gerado)
-        const videos = Array.from(document.querySelectorAll('video')).filter(v => v.offsetParent !== null);
+        const videos = Array.from(document.querySelectorAll('video')).filter(v => _isVisible(v));
         if (videos.length) {
             const v = videos[videos.length - 1];
             const clickable = v.closest('button, a, [role="button"], [role="listitem"], [data-testid]') || v.parentElement || v;
             console.log('[Extend] fallback: ultimo thumb de video');
             return clickable;
         }
-        // Sem <video>, tenta cards com poster image em layout de grid
         const imgs = Array.from(document.querySelectorAll('img')).filter(i =>
-            i.offsetParent !== null && i.naturalWidth > 100 && i.closest('[role="button"], button, a, [data-testid]'));
+            _isVisible(i) && i.naturalWidth > 100 && i.closest('[role="button"], button, a, [data-testid]'));
         if (imgs.length) {
             const im = imgs[imgs.length - 1];
             return im.closest('[role="button"], button, a, [data-testid]');
@@ -4869,11 +4875,16 @@
         }
         // Ultimo recurso: dump de botoes visiveis para debug
         const btns = Array.from(document.querySelectorAll('button, [role="button"]'))
-            .filter(b => b.offsetParent !== null)
-            .map(b => (b.textContent || '').trim().substring(0, 30))
-            .filter(t => t)
-            .slice(0, 20);
-        console.warn('[Extend] detail nao abriu. Botoes visiveis:', btns);
+            .filter(b => _isVisible(b))
+            .map(b => {
+                const txt = ((b.innerText || b.textContent || '').trim()).replace(/\s+/g, ' ').substring(0, 50);
+                const aria = (b.getAttribute('aria-label') || '').substring(0, 30);
+                return txt + (aria ? ' [aria=' + aria + ']' : '');
+            })
+            .filter(t => t.replace(/\[aria=\]/, '').trim())
+            .slice(0, 40);
+        console.warn('[Extend] detail nao abriu. Botoes visiveis (' + btns.length + '):');
+        btns.forEach((s, i) => console.warn('  [' + i + '] ' + s));
         return false;
     }
 
@@ -4911,6 +4922,22 @@
         return false;
     }
 
+    // Submete e usa o evento dotti-video-submitted (via _extendPending) como prova.
+    // clickCreateButton tem verificacao visual (textarea limpa) que NAO funciona em
+    // extend mode — Flow mantem o texto/state diferente. A API e a fonte de verdade.
+    async function _submitAndAwaitApi(sceneNumber, kind, timeoutMs) {
+        _extendPending = { sceneNumber, kind };
+        // Dispara o submit. Ignoramos o retorno: a verificacao real e pelo evento da API.
+        try { await clickCreateButton(); } catch (_) {}
+        const deadline = Date.now() + (timeoutMs || 10000);
+        while (Date.now() < deadline) {
+            if (_extendPending === null) return true; // API listener consumiu = submit OK
+            await sleep(150);
+        }
+        _extendPending = null;
+        return false;
+    }
+
     async function runExtendBase(scene) {
         console.log('[Extend] runExtendBase SCENE', scene.number);
         _installExtendInterceptListener();
@@ -4929,14 +4956,10 @@
             const filled = await fillTextarea(scene.text);
             if (!filled) throw new Error('fill_textarea_failed');
 
-            // Marcar pending ANTES do submit
-            _extendPending = { sceneNumber: scene.number, kind: 'base' };
-
-            // Submit
-            const ok = await clickCreateButton();
+            // Submit + aguarda confirmacao da API (em vez de checagem visual frageil)
+            const ok = await _submitAndAwaitApi(scene.number, 'base', 12000);
             if (!ok) {
-                _extendPending = null;
-                chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: 'submit_failed' }).catch(() => {});
+                chrome.runtime.sendMessage({ action: 'EXTEND_STEP_FAILED', sceneNumber: scene.number, reason: 'submit_failed_no_api' }).catch(() => {});
                 return { success: false };
             }
             return { success: true };
@@ -4964,19 +4987,19 @@
         );
 
         // Estrategia 2: botao com icone material "arrow_back"
-        if (!back || back.offsetParent === null) {
+        if (!back || !_isVisible(back)) {
             const icons = Array.from(document.querySelectorAll('i, span'))
-                .filter(i => i.offsetParent !== null && /arrow_back\b/i.test(i.textContent || ''));
+                .filter(i => _isVisible(i) && /arrow_back\b/i.test(i.textContent || ''));
             for (const ic of icons) {
                 const parent = ic.closest('button, a, [role="button"]');
-                if (parent && parent.offsetParent !== null) { back = parent; break; }
+                if (parent && _isVisible(parent)) { back = parent; break; }
             }
         }
 
         // Estrategia 3: primeiro botao no canto superior esquerdo (top<100, left<100)
-        if (!back || back.offsetParent === null) {
+        if (!back || !_isVisible(back)) {
             const cands = Array.from(document.querySelectorAll('button, a, [role="button"]'))
-                .filter(b => b.offsetParent !== null);
+                .filter(b => _isVisible(b));
             for (const c of cands) {
                 const r = c.getBoundingClientRect();
                 if (r.top < 80 && r.left < 80 && r.width < 80 && r.height < 80) {
@@ -5011,7 +5034,14 @@
         console.log('[Extend] runExtendExt SCENE', scene.number, 'idx', scene.extIdx, 'isFirstExt=' + scene.isFirstExt);
         _installExtendInterceptListener();
         try {
-            // 1) Abrir detalhe do video alvo (multiplas estrategias)
+            // 1) Abrir detalhe do video alvo (multiplas estrategias).
+            // Em modo RESUME, forca voltar para home antes para nao confundir
+            // com um detalhe antigo aberto manualmente.
+            if (scene.forceReopenDetail) {
+                console.log('[Extend] forceReopenDetail=true — voltando p/ home antes de abrir detalhe alvo');
+                await _ensureProjectHome();
+                await sleep(400);
+            }
             const opened = await _openDetailForMediaId(scene.baseMediaId);
             if (!opened) throw new Error('detail_view_not_opened');
             await sleep(800); // DOM acomodar
@@ -5046,13 +5076,9 @@
             if (!filled) throw new Error('fill_textarea_failed');
             await sleep(300);
 
-            // 6) Marcar pending e submeter
-            _extendPending = { sceneNumber: scene.number, kind: 'ext' };
-            const ok = await clickCreateButton();
-            if (!ok) {
-                _extendPending = null;
-                throw new Error('submit_failed');
-            }
+            // 6) Submit + aguarda confirmacao da API (fonte de verdade)
+            const ok = await _submitAndAwaitApi(scene.number, 'ext', 12000);
+            if (!ok) throw new Error('submit_failed_no_api');
             return { success: true };
         } catch (e) {
             console.error('[Extend] runExtendExt erro:', e.message);
@@ -5062,29 +5088,110 @@
         }
     }
 
+    function _findFlowDownloadButton() {
+        // O Flow tem um botao de download no header do detalhe (icone download
+        // ao lado de favorito/compartilhar). Procurar:
+        // 1) aria-label contendo "baixar"/"download"
+        // 2) <button> contendo material icon "download"/"file_download"/"arrow_downward"
+        // Restrito ao header (top<150px) para nao casar com botoes do sidebar.
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"], a'))
+            .filter(_isVisible);
+        for (const b of buttons) {
+            const r = b.getBoundingClientRect();
+            if (r.top > 150) continue; // so header
+            const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
+            if (/baixar|download/.test(aria)) return b;
+            // material icon dentro
+            const inner = (b.innerText || b.textContent || '').toLowerCase().trim();
+            if (inner === 'download' || inner === 'file_download' || inner === 'arrow_downward') return b;
+            // icone material como <i> ou <span>
+            const icons = b.querySelectorAll('i, span');
+            for (const ic of icons) {
+                const t = (ic.textContent || '').trim().toLowerCase();
+                if (t === 'download' || t === 'file_download' || t === 'arrow_downward') return b;
+            }
+        }
+        return null;
+    }
+
+    function _findFullVideoMenuItem() {
+        // Item "Video completo" / "Vídeo completo" no menu de download (abre submenu)
+        const candidates = Array.from(document.querySelectorAll('[role="menuitem"], button, li, a, div[tabindex], div[role]')).filter(_isVisible);
+        for (const c of candidates) {
+            const t = _allText(c);
+            if (!t || t.length > 60) continue;
+            if (/v(í|i)deo\s*completo/.test(t)) {
+                console.log('[Extend] fullVideoMenuItem MATCH:', t);
+                return c;
+            }
+        }
+        return null;
+    }
+
+    function _findFullVideoQualityOption() {
+        // Submenu de "Video completo": primeira opcao (ex.: "720p Tamanho original").
+        // Evita a opcao Zip (que baixa todos os clipes separados).
+        const candidates = Array.from(document.querySelectorAll('[role="menuitem"], button, li, a, div[tabindex], div[role]')).filter(_isVisible);
+        for (const c of candidates) {
+            const t = _allText(c);
+            if (!t || t.length > 100) continue;
+            if (/\bzip\b|todos\s*os\s*clipes/.test(t)) continue;
+            if (/720p|1080p|tamanho\s*original|original\s*size|full\s*size/.test(t)) {
+                console.log('[Extend] fullVideoQualityOption MATCH:', t);
+                return c;
+            }
+        }
+        return null;
+    }
+
     async function runExtendDownload(scene) {
         console.log('[Extend] runExtendDownload SCENE', scene.number, 'mediaId=' + (scene.mediaId || '?').substring(0, 12));
         try {
-            // Tenta achar a URL do video com base no mediaId
-            const frag = (scene.mediaId || '').split('/').pop().split(':').pop();
-            let videoUrl = null;
-            const videos = Array.from(document.querySelectorAll('video'));
-            for (const v of videos) {
-                const src = v.src || v.querySelector('source')?.src || '';
-                if (src && (!frag || src.includes(frag))) { videoUrl = src; break; }
+            // Garantir que estamos no detalhe do video alvo. Cenas com 0 EXTs
+            // pulam direto da home para download — precisamos abrir o detalhe primeiro.
+            if (!_findEstenderButton()) {
+                console.log('[Extend] download: detalhe nao aberto, abrindo via mediaId...');
+                const opened = await _openDetailForMediaId(scene.mediaId);
+                if (!opened) throw new Error('detail_not_opened_for_download');
+                await sleep(800);
             }
-            if (!videoUrl && videos.length) videoUrl = videos[videos.length - 1].src;
-            if (!videoUrl) throw new Error('video_url_not_found');
 
-            const filename = 'SCENE_' + String(scene.number).padStart(3, '0') + '_' + scene.totalSeconds + 's.mp4';
+            const dlBtn = _findFlowDownloadButton();
+            if (!dlBtn) throw new Error('download_button_not_found');
+
+            // Avisar background p/ interceptar e renomear o proximo download
             await chrome.runtime.sendMessage({
-                action: 'DOWNLOAD_VIDEO',
-                url: videoUrl,
-                filename,
-                folder: scene.folder
+                action: 'EXTEND_EXPECT_NATIVE_DOWNLOAD',
+                sceneNumber: scene.number,
+                folder: scene.folder,
+                totalSeconds: scene.totalSeconds
             });
-            // Volta para a home do projeto para a proxima cena comecar limpa
-            await sleep(800);
+
+            // 1+2) Abrir menu de download e achar "Video completo" — com retry
+            let fullItem = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                console.log('[Extend] passo 1 (tent ' + attempt + '): clicando icone download');
+                await _trustedClickEl(dlBtn);
+                await sleep(800);
+                console.log('[Extend] passo 2: procurando "Video completo"');
+                fullItem = await _waitForElement(_findFullVideoMenuItem, 4000);
+                if (fullItem) break;
+                console.warn('[Extend] menu nao apareceu — fechando e tentando de novo');
+                document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+                await sleep(500);
+            }
+            if (!fullItem) throw new Error('full_video_menu_not_found');
+            await _trustedClickEl(fullItem);
+            await sleep(600);
+
+            // 3) Clicar em opcao de qualidade (720p / Tamanho original)
+            console.log('[Extend] passo 3: procurando opcao de qualidade');
+            const quality = await _waitForElement(_findFullVideoQualityOption, 5000);
+            if (!quality) throw new Error('quality_option_not_found');
+            await _trustedClickEl(quality);
+            await sleep(3000); // tempo p/ download disparar
+
+            // Voltar para home para a proxima cena comecar limpa
             await _ensureProjectHome();
             return { success: true };
         } catch (e) {
