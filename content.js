@@ -2797,17 +2797,37 @@
         // Regenerar isso e decisao dela, e so depois de tudo enviado.
         const naoGerados = _promptList.filter(t =>
             t.status === 'aguardando_verificacao' || t.status === 'generating');
+        let contaNaoGerado = 0, contaGeradoSemBaixar = 0;
         for (const task of naoGerados) {
             const slotToFree = _slots.findIndex(s => s === task.uuid);
             if (slotToFree !== -1) _slots[slotToFree] = null;
-            task.status = 'failed';
-            task.failType = 'NAO_GERADO';
-            task.error = 'Nao ficou pronto ate o fim do envio';
-            console.log('[Dotti] [' + formatPromptId(task) + '] NAO GERADO — sem reenvio automatico');
-            notifyPanel({ type: 'PROMPT_FAILED', data: { number: task.number, failType: 'NAO_GERADO', error: task.error } });
+
+            if (task.gerado) {
+                // v3.5.1: o video EXISTE no Flow — a varredura chegou a ver o
+                // tile, so o download nao concluiu. Marcar como falha jogaria
+                // isso em NAO GERADOS, que e justamente o erro relatado.
+                // Fica contado em GERADOS e sem download.
+                task.status = 'failed';
+                task.failType = 'GERADO_SEM_DOWNLOAD';
+                task.error = 'Video gerado, download nao concluido';
+                contaGeradoSemBaixar++;
+                console.log('[Dotti] [' + formatPromptId(task) +
+                    '] GERADO mas nao baixado — nao conta como nao gerado');
+                // De proposito NAO manda PROMPT_FAILED: o painel ja o tem como
+                // "generated" via VIDEO_GENERATED, e PROMPT_FAILED o moveria
+                // para erro.
+            } else {
+                task.status = 'failed';
+                task.failType = 'NAO_GERADO';
+                task.error = 'Nao ficou pronto ate o fim do envio';
+                contaNaoGerado++;
+                console.log('[Dotti] [' + formatPromptId(task) + '] NAO GERADO — sem reenvio automatico');
+                notifyPanel({ type: 'PROMPT_FAILED', data: { number: task.number, failType: 'NAO_GERADO', error: task.error } });
+            }
         }
         if (naoGerados.length) {
-            console.log('[Dotti] ' + naoGerados.length + ' prompt(s) marcado(s) como NAO GERADO. ' +
+            console.log('[Dotti] Fim: ' + contaNaoGerado + ' nao gerado(s), ' +
+                contaGeradoSemBaixar + ' gerado(s) sem download. ' +
                 'Reenvio so sob autorizacao, agora que a lista inteira ja foi enviada.');
         }
 
@@ -3116,8 +3136,14 @@
     // scanForVideos — identico DarkPlanner (6 prioridades + error detection)
     // ============================================
     async function scanForVideos() {
-        // Scroll progressivo para revelar itens virtualizados (mini window)
+        // Scroll progressivo para revelar itens virtualizados.
+        // v3.5.1: o cdk-virtual-scroll-viewport renderiza a faixa nova de forma
+        // ASSINCRONA. Consultar os tiles logo apos mexer no scrollTop devolvia
+        // os tiles de ANTES da rolagem, entao cada passada enxergava a janela
+        // anterior e a cobertura da grade ficava atrasada. O await abaixo da o
+        // tempo do Angular montar os tiles novos antes de varrer.
         scrollToRevealMore();
+        await sleep(400);
 
         // === DETECAO DE FALHAS (identico DarkPlanner) ===
         // DOM-based failure detection APENAS quando API nao esta ativa
@@ -3496,8 +3522,15 @@
     // nem tinham sido enviados ainda — venceram porque continham literalmente
     // as palavras da parafrase que o Flow gerou como titulo.
     function _promptsJaEnviados() {
+        // v3.5.1: alem de ja enviado, o candidato tem que AINDA FALTAR BAIXAR.
+        // Sem esse filtro o pool cresce a cada prompt enviado e passa a incluir
+        // dezenas de prompts ja baixados. Como o nivel 2 exige folga sobre o
+        // segundo colocado, pool grande = empate = INCERTO = nao baixa nunca.
+        // Medido: pool de 7 casava; com 20, 50 e 78 dava INCERTO em todos.
+        // Era isso que fazia o casamento degradar conforme a fila avancava.
         return _promptList.filter(p =>
-            p.startedAt || p.status === 'generating' || p.status === 'complete');
+            (p.startedAt || p.status === 'generating' || p.status === 'complete') &&
+            (p.foundVideos || 0) < (p.expectedVideos || 1));
     }
 
     // v3.4.3: decisao em tres niveis. Nomear errado e pior do que nao baixar,
@@ -3578,6 +3611,20 @@
             const prompt = _casarTileComPrompt(rotulo);
 
             if (!prompt) continue; // _casarTileComPrompt ja logou o motivo
+
+            // v3.5.1: achar o tile ja prova que o Flow GEROU o video, mesmo que
+            // o download ainda nao tenha acontecido. Antes essa informacao se
+            // perdia: o unico sinal de "gerado" que chegava ao painel era o
+            // proprio VIDEO_DOWNLOADED, entao GERADOS so subia junto com
+            // BAIXADOS e ficava sempre igual. Marca aqui, antes de baixar.
+            if (!prompt.gerado) {
+                prompt.gerado = true;
+                notifyPanel({
+                    type: 'VIDEO_GENERATED',
+                    data: { promptNumber: prompt.number }
+                });
+                console.log('[Dotti Scanner] Prompt #' + prompt.number + ' GERADO (tile encontrado na grade)');
+            }
 
             const filename = _nomeArquivoDoPrompt(prompt, prompt.foundVideos + 1);
             console.log('[Dotti Scanner] Baixando tile #' + prompt.number + ' -> ' + filename);

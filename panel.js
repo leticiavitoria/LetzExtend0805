@@ -258,6 +258,15 @@ function setupMessageListener() {
                 })();
                 break;
 
+            // v3.5.1: o tile do prompt foi encontrado na grade do Flow, ou
+            // seja, o video EXISTE — mesmo que o download ainda nao tenha
+            // ocorrido. Sem esta mensagem o unico sinal de "gerado" que chegava
+            // era o proprio VIDEO_DOWNLOADED, e por isso GERADOS ficava sempre
+            // igual a BAIXADOS.
+            case "VIDEO_GENERATED":
+                handleVideoGenerated(data);
+                break;
+
             // v3.0.0: Content.js baixou video direto (estilo DarkPlanner)
             case "VIDEO_DOWNLOADED":
                 handleVideoDownloaded(data);
@@ -472,6 +481,31 @@ function handleImageGenerated(data) {
 // VIDEO DOWNLOADED (content.js baixou direto, estilo DarkPlanner)
 // Content.js fez o scan DOM -> match -> download -> avisa o panel
 // ============================================
+function handleVideoGenerated(data) {
+    const { promptNumber } = data || {};
+    if (!promptNumber) return;
+
+    // Mesma convencao de handleVideoDownloaded: percorre as abas e para na
+    // primeira que tiver o prompt.
+    for (const tab of ["video", "frame"]) {
+        const state = tabState[tab];
+        const prompt = state.prompts.find(p => p.number === promptNumber);
+        if (!prompt) continue;
+
+        // Nao rebaixar quem ja foi baixado
+        if (prompt.mediaStatus === "downloaded") break;
+
+        prompt.generated = true;
+        prompt.status = "generated";
+        prompt.mediaStatus = "generated";
+        console.log("[Dotti Panel] VIDEO_GENERATED: prompt #" + promptNumber + " (aguardando download)");
+
+        displayPrompts(tab);
+        updateStatsDisplay(tab);
+        break;
+    }
+}
+
 function handleVideoDownloaded(data) {
     const { promptNumber, mediaId, url } = data || {};
     if (!promptNumber) return;
