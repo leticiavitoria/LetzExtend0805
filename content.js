@@ -4529,35 +4529,106 @@
     // INITIALIZATION
     // ============================================
 
-    function init() {
-        if (!window.location.href.includes("labs.google")) return;
+    // v3.2.0: injecao auto-regenerativa.
+    // O Flow e um SPA (Next.js). Antes, init() rodava UMA vez no document_idle e
+    // inseria o botao/painel em document.body. Se o SPA re-renderiza a arvore
+    // depois disso, nossos nos sao descartados e nunca mais voltam — a extensao
+    // "some" da pagina. ensureInjected() e idempotente e pode ser chamada em
+    // loop; os watchers abaixo a chamam sempre que o DOM ou a rota mudam.
+    let _initDone = false;
+    let _reinjectTimer = null;
 
-        if (!document.getElementById(TOGGLE_BTN_ID)) {
+    function ensureInjected() {
+        if (!window.location.href.includes("labs.google")) return;
+        if (!document.body) return;
+
+        // Botao-raio
+        const existente = document.getElementById(TOGGLE_BTN_ID);
+        if (!existente) {
             toggleBtn = document.createElement("div");
             toggleBtn.id = TOGGLE_BTN_ID;
             toggleBtn.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 2L4 14H11L10 22L19 10H12L13 2Z" fill="#FFD700" stroke="#FFD700" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
             toggleBtn.title = "Lets Automate";
             toggleBtn.addEventListener("click", togglePanel);
             document.body.appendChild(toggleBtn);
+            toggleBtn.classList.toggle("active", isPanelVisible);
+            toggleBtn.classList.toggle("sidebar-closed", !isPanelVisible);
+        } else {
+            // Reaponta a referencia: o no antigo pode ter sido detachado
+            toggleBtn = existente;
         }
 
-        // v3.0.0: Inject API interceptor and setup listeners BEFORE panel
+        // Sidebar — so recria se estava aberta (respeita quem fechou de proposito)
+        if (isPanelVisible && !document.getElementById(PANEL_ID)) {
+            createPanel();
+            document.documentElement.classList.add("dotti-sidebar-open");
+        }
+    }
+
+    function _scheduleReinject() {
+        if (_reinjectTimer) return;
+        _reinjectTimer = setTimeout(() => {
+            _reinjectTimer = null;
+            try { ensureInjected(); } catch (e) {
+                console.log("[Lets Automate] reinject erro:", e.message);
+            }
+        }, 300);
+    }
+
+    function _installWatchers() {
+        // 1. SPA removeu nossos nos do DOM
+        try {
+            const obs = new MutationObserver(() => {
+                if (!document.getElementById(TOGGLE_BTN_ID) ||
+                    (isPanelVisible && !document.getElementById(PANEL_ID))) {
+                    _scheduleReinject();
+                }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+        } catch (e) {
+            console.log("[Lets Automate] MutationObserver falhou:", e.message);
+        }
+
+        // 2. Navegacao interna do SPA (home <-> projeto) nao dispara load
+        for (const metodo of ["pushState", "replaceState"]) {
+            try {
+                const original = history[metodo];
+                history[metodo] = function () {
+                    const r = original.apply(this, arguments);
+                    _scheduleReinject();
+                    return r;
+                };
+            } catch (e) { }
+        }
+        window.addEventListener("popstate", _scheduleReinject);
+        window.addEventListener("hashchange", _scheduleReinject);
+
+        // 3. Rede de seguranca: cobre hidratacao tardia nos primeiros 30s
+        let ticks = 0;
+        const iv = setInterval(() => {
+            try { ensureInjected(); } catch (e) { }
+            if (++ticks >= 15) clearInterval(iv);
+        }, 2000);
+    }
+
+    function init() {
+        if (!window.location.href.includes("labs.google")) return;
+        if (_initDone) return;
+        _initDone = true;
+
+        // Auto-abrir sidebar ao carregar a pagina
+        isPanelVisible = true;
+        ensureInjected();
+
+        // v3.0.0: Inject API interceptor and setup listeners
         injectInterceptor();
         // v3.1.0: Inject Slate helper for MAIN world text fill + submit
         injectSlateHelper();
         setupApiInterceptorListeners();
         setupNetworkErrorInterceptor();
 
-        // Auto-abrir sidebar ao carregar a pagina
-        if (!document.getElementById(PANEL_ID)) {
-            createPanel();
-            isPanelVisible = true;
-            document.documentElement.classList.add("dotti-sidebar-open");
-            if (toggleBtn) {
-                toggleBtn.classList.add("active");
-                toggleBtn.classList.remove("sidebar-closed");
-            }
-        }
+        // v3.2.0: manter a injecao viva apos re-renders/navegacao do SPA
+        _installWatchers();
 
         // Ao carregar o Flow: abrir novo projeto (se veio do icone)
         // Flow UI unificada - nao precisa mais trocar tabs/dropdown
@@ -4578,7 +4649,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.1.0 ready");
+        console.log("[Lets Automate] v3.2.0 ready (injecao auto-regenerativa ativa)");
     }
 
     if (document.readyState === "loading") {
