@@ -188,7 +188,79 @@
             const src = v.src || (v.querySelector("source") || {}).src || "(sem src)";
             log(`   ${i}. ${src.slice(0, 120)}`);
             log(`      getMediaUrlRedirect? ` + (src.includes("getMediaUrlRedirect") ? "SIM" : "NAO"));
+            // Sobe a arvore: e daqui que sai o seletor do tile
+            let pai = v.parentElement, nivel = 0;
+            while (pai && nivel < 5) {
+                log(`      pai[${nivel}]: ` + desc(pai).slice(0, 160));
+                pai = pai.parentElement; nivel++;
+            }
         });
+    }
+
+    // ---------- 6b. GRADE DE RESULTADOS (precisa de projeto COM videos) ----------
+    hr();
+    log("6b) GRADE DE RESULTADOS — estrutura dos tiles");
+    hr();
+    {
+        const vp = document.querySelector("cdk-virtual-scroll-viewport");
+        if (!vp) {
+            log("cdk-virtual-scroll-viewport NAO encontrado nesta tela.");
+        } else {
+            log("viewport: " + desc(vp).slice(0, 160));
+            // Desce 4 niveis mostrando quantos irmaos tem cada um — o nivel
+            // com N irmaos iguais e a linha/tile que a automacao precisa.
+            let nivel = 0, atual = vp;
+            while (atual && nivel < 5) {
+                const filhos = Array.from(atual.children);
+                log(`  nivel ${nivel}: ${filhos.length} filho(s)`);
+                filhos.slice(0, 3).forEach((c, i) => log(`     ${i}. ` + desc(c).slice(0, 150)));
+                atual = filhos[0];
+                nivel++;
+            }
+        }
+    }
+
+    // ---------- 6c. ANCORAS ESTAVEIS (classe, nao aria-label) ----------
+    hr();
+    log("6c) ANCORAS ESTAVEIS — classes e icones");
+    hr();
+    log("Os aria-label vem traduzidos, entao seletor por texto e fragil.");
+    log("As classes abaixo e que servem de ancora.");
+    log("");
+    log("Classes de <button> presentes (dedup, ignorando as genericas mdc/mat):");
+    {
+        const vistas = new Set();
+        document.querySelectorAll("button").forEach(b => {
+            (b.getAttribute("class") || "").split(/\s+/).forEach(c => {
+                if (c && !/^(mdc-|mat-|ng-|cdk-)/.test(c)) vistas.add(c);
+            });
+        });
+        const arr = Array.from(vistas).sort();
+        if (!arr.length) log("   NENHUMA classe especifica — so genericas do Material");
+        arr.slice(0, 40).forEach(c => log("   ." + c));
+    }
+    log("");
+    log("Textos de <mat-icon> presentes (dedup) — usados pra achar botao por icone:");
+    {
+        const ic = new Set();
+        document.querySelectorAll("mat-icon, .material-symbols-outlined, .material-icons").forEach(i => {
+            const t = (i.textContent || "").trim();
+            if (t && t.length < 30) ic.add(t);
+        });
+        const arr = Array.from(ic).sort();
+        if (!arr.length) log("   NENHUM");
+        log("   " + arr.join(", "));
+    }
+    log("");
+    log("Elementos com cara de DOWNLOAD (icone ou label):");
+    {
+        const achados = [];
+        document.querySelectorAll("button, [role='menuitem'], a").forEach(el => {
+            const txt = ((el.innerText || "") + " " + (el.getAttribute("aria-label") || "")).toLowerCase();
+            if (/download|baixar|salvar|save/.test(txt)) achados.push(el);
+        });
+        if (!achados.length) log("   NENHUM — abra o menu de download antes de rodar");
+        achados.slice(0, 8).forEach((e, i) => log(`   ${i}. ` + desc(e).slice(0, 170)));
     }
 
     // ---------- 7. Checagem tardia ----------
