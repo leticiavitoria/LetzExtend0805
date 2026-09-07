@@ -1,13 +1,17 @@
 // ============================================
-// DIAGNOSTICO — Lets Automate x Google Flow
+// DIAGNOSTICO v2 — Lets Automate x Google Flow
 // ============================================
+// Objetivo: confirmar se o Flow migrou de React/Next.js para Angular
+// e quais seletores realmente batem NESTE navegador, antes de reescrever
+// a camada de automacao.
+//
 // COMO USAR:
 //   1. Abra o Flow numa ABA NORMAL do Chrome (nao na janela da extensao,
 //      que e popup e nao tem F12 nem barra de endereco).
-//   2. Aperte F12 -> aba "Console".
-//   3. Cole TODO este arquivo e aperte Enter.
-//   4. Espere 5 segundos. O relatorio e impresso e ja vai copiado
-//      pra area de transferencia. Cole na conversa.
+//   2. Entre num PROJETO (nao fique so na home) — e la que ficam o campo
+//      de prompt, o botao de gerar e a grade de resultados.
+//   3. F12 -> aba "Console". Cole TODO este arquivo e Enter.
+//   4. Espere 5s. O relatorio ja vai copiado pra area de transferencia.
 // ============================================
 
 (function () {
@@ -15,9 +19,8 @@
 
     const out = [];
     const log = (s) => out.push(s);
-    const hr = () => log("-".repeat(60));
+    const hr = () => log("-".repeat(64));
 
-    // Descreve um elemento de forma compacta mas util p/ escrever seletor novo
     function desc(el) {
         if (!el) return "(null)";
         const parts = [el.tagName.toLowerCase()];
@@ -26,42 +29,31 @@
         if (cls) parts.push("." + cls.split(/\s+/).slice(0, 4).join("."));
         for (const a of el.attributes || []) {
             if (a.name.startsWith("data-") || a.name === "role" ||
-                a.name === "aria-label" || a.name === "aria-placeholder" ||
-                a.name === "data-placeholder" || a.name === "type" ||
-                a.name === "contenteditable") {
+                a.name === "aria-label" || a.name === "contenteditable" ||
+                a.name.startsWith("ng-") || a.name.startsWith("_ng")) {
                 let v = a.value || "";
-                if (v.length > 60) v = v.slice(0, 60) + "...";
+                if (v.length > 50) v = v.slice(0, 50) + "...";
                 parts.push(`[${a.name}="${v}"]`);
             }
         }
         let txt = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ");
-        if (txt.length > 70) txt = txt.slice(0, 70) + "...";
+        if (txt.length > 60) txt = txt.slice(0, 60) + "...";
         if (txt) parts.push(`  txt="${txt}"`);
         return parts.join("");
     }
 
-    function dump(label, selector, limit = 8) {
-        let nodes = [];
-        try { nodes = Array.from(document.querySelectorAll(selector)); }
-        catch (e) { log(`${label} [${selector}] -> SELETOR INVALIDO: ${e.message}`); return; }
-        log(`${label} [${selector}] -> ${nodes.length} encontrado(s)`);
-        nodes.slice(0, limit).forEach((n, i) => log(`   ${i}. ` + desc(n)));
-        if (nodes.length > limit) log(`   ... +${nodes.length - limit} outros`);
+    // Conta quantos casam, sem explodir em seletor invalido
+    function count(sel) {
+        try { return document.querySelectorAll(sel).length; }
+        catch (e) { return -1; }
     }
 
-    // Visibilidade real — separa "nao injetou" de "injetou invisivel"
-    function visInfo(el, name) {
-        if (!el) { log(`${name}: AUSENTE do DOM`); return; }
-        const cs = getComputedStyle(el);
-        const r = el.getBoundingClientRect();
-        log(`${name}: PRESENTE`);
-        log(`   ` + desc(el));
-        log(`   display=${cs.display} visibility=${cs.visibility} opacity=${cs.opacity}`);
-        log(`   position=${cs.position} zIndex=${cs.zIndex}`);
-        log(`   rect: x=${Math.round(r.x)} y=${Math.round(r.y)} w=${Math.round(r.width)} h=${Math.round(r.height)}`);
-        const visivel = r.width > 0 && r.height > 0 && cs.display !== "none" &&
-            cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0.01;
-        log(`   => ${visivel ? "VISIVEL na tela" : "*** INVISIVEL ***"}`);
+    function check(rotulo, sel) {
+        const n = count(sel);
+        const marca = n < 0 ? "SELETOR INVALIDO" : (n > 0 ? "OK   " : "ZERO ");
+        log(`  [${marca}] ${String(n < 0 ? "-" : n).padStart(3)}  ${rotulo}`);
+        log(`             ${sel}`);
+        return n;
     }
 
     // ---------- 1. URL / ambiente ----------
@@ -72,140 +64,165 @@
     log("origin   : " + location.origin);
     log("pathname : " + location.pathname);
     log("title    : " + document.title);
-    log("userAgent: " + navigator.userAgent);
     log("");
-    log("Casa com o manifest atual (https://labs.google/*)? " +
-        (location.origin === "https://labs.google" ? "SIM" : "*** NAO — ESSA E A CAUSA ***"));
-    log("Passa no gate do painel (panel.js)? " +
-        ((location.href.includes("labs.google/flow") || location.href.includes("labs.google/fx"))
-            ? "SIM" : "*** NAO — painel ficaria desabilitado ***"));
+    log("Casa com o manifest (https://labs.google/*)? " +
+        (location.origin === "https://labs.google" ? "SIM" : "*** NAO ***"));
+    log("Estamos DENTRO de um projeto? " +
+        (/\/project\/|\/edit\//.test(location.pathname) ? "SIM" : "provavelmente NAO (va pra dentro de um projeto)"));
 
-    // ---------- 2. A extensao injetou? ----------
+    // ---------- 2. QUAL FRAMEWORK? (a pergunta decisiva) ----------
     hr();
-    log("2) A EXTENSAO INJETOU?");
+    log("2) FRAMEWORK — ANGULAR OU REACT?");
+    hr();
+    const ngEl = document.querySelector("[ng-version]");
+    const ngVersion = ngEl ? ngEl.getAttribute("ng-version") : null;
+    const temNext = !!document.getElementById("__next");
+    const nMat = count("mat-icon, mat-button-toggle, [class*='mat-mdc']");
+    const nCdk = count("cdk-virtual-scroll-viewport, [class*='cdk-']");
+    const nFlowEl = count("flow-menu-item, flow-grid-tile-container, [class^='flow-']");
+    const temProseMirror = count(".ProseMirror") > 0;
+    const temSlate = count("[data-slate-editor]") > 0;
+
+    log("[ng-version] presente?      " + (ngVersion ? "SIM -> Angular " + ngVersion : "nao"));
+    log("#__next presente?           " + (temNext ? "SIM -> Next.js/React" : "nao"));
+    log("elementos mat-* (Angular):  " + nMat);
+    log("elementos cdk-* (Angular):  " + nCdk);
+    log("custom elements flow-*:     " + nFlowEl);
+    log("editor ProseMirror?         " + (temProseMirror ? "SIM" : "nao"));
+    log("editor Slate.js?            " + (temSlate ? "SIM" : "nao"));
+    // React deixa chaves __reactFiber$ nos nos do DOM
+    let temReactFiber = false;
+    try {
+        const amostra = document.querySelectorAll("div");
+        for (let i = 0; i < Math.min(amostra.length, 300); i++) {
+            if (Object.keys(amostra[i]).some(k => k.startsWith("__reactFiber$") || k.startsWith("__reactProps$"))) {
+                temReactFiber = true; break;
+            }
+        }
+    } catch (e) { }
+    log("chaves __reactFiber no DOM? " + (temReactFiber ? "SIM -> React ativo" : "nao"));
+    log("");
+    const angular = !!ngVersion || (nMat + nCdk + nFlowEl) > 3;
+    log(">>> VEREDITO: " + (angular
+        ? "ANGULAR — nossa extensao esta com os seletores errados"
+        : (temNext || temReactFiber ? "REACT/NEXT.JS — o DOM velho ainda vale" : "INDETERMINADO — me manda o relatorio mesmo assim")));
+
+    // ---------- 3. Seletores NOVOS (Angular) ----------
+    hr();
+    log("3) SELETORES NOVOS (Angular) — subconjunto CSS-valido");
+    hr();
+    log("  Formato: [status] qtd  nome");
+    log("");
+    check("promptTextarea (o mais critico)", 'div.ProseMirror[contenteditable="true"]');
+    check("submitButton", "button.generate-icon-button");
+    check("createProjectButton", "button.new-project-button");
+    check("modelSelectButton", 'button[aria-label="Select model family"]');
+    check("configButton", "button.settings-trigger-button");
+    check("addImageButton / addFrameButton", "button.add-menu-trigger");
+    check("virtuosoItemList (grade)", "cdk-virtual-scroll-viewport");
+    check("outputItems (tiles)", "flow-grid-tile-container");
+    check("modelTemplate (itens de menu)", 'flow-menu-item button[role="menuitem"]');
+    check("modos / proporcao / duracao", "mat-button-toggle");
+    check("menus abertos", "div.mat-mdc-menu-content");
+    check("fileInput", 'input[type="file"]');
+    check("tiles por id (fallback)", "div[data-tile-id]");
+
+    // ---------- 4. Seletores VELHOS (os que nosso codigo usa hoje) ----------
+    hr();
+    log("4) SELETORES VELHOS — o que content.js usa HOJE");
+    hr();
+    log("  Se estes derem ZERO, a automacao esta morta.");
+    log("");
+    check("prompt (Slate) — content.js:348 etc", '[role="textbox"]');
+    check("textarea legado", "#PINHOLE_TEXT_AREA_ELEMENT_ID");
+    check("raiz Next.js — content.css depende", "#__next");
+    check("grade react-virtuoso", "[data-item-index]");
+    check("toasts (Sonner)", "[data-sonner-toast]");
+    check("popovers (Radix UI)", "[data-radix-popper-content-wrapper]");
+
+    // ---------- 5. A extensao injetou? ----------
+    hr();
+    log("5) NOSSA EXTENSAO INJETOU?");
     hr();
     const btn = document.getElementById("dotti-sender-toggle-btn");
     const panel = document.getElementById("dotti-sender-full-panel");
-    visInfo(btn, "Botao-raio (#dotti-sender-toggle-btn)");
-    log("");
-    visInfo(panel, "Sidebar (#dotti-sender-full-panel)");
-    log("");
+    for (const [nome, el] of [["Botao-raio", btn], ["Sidebar", panel]]) {
+        if (!el) { log(`${nome}: AUSENTE do DOM`); continue; }
+        const cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        const visivel = r.width > 0 && r.height > 0 && cs.display !== "none" &&
+            cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0.01;
+        log(`${nome}: PRESENTE — ${visivel ? "VISIVEL" : "*** INVISIVEL ***"}` +
+            ` (display=${cs.display} opacity=${cs.opacity} w=${Math.round(r.width)} h=${Math.round(r.height)})`);
+    }
     log("classe dotti-sidebar-open no <html>? " +
         (document.documentElement.classList.contains("dotti-sidebar-open") ? "SIM" : "NAO"));
-    log("script interceptor injetado? " +
-        (document.querySelector("script[data-dotti-interceptor]") ? "SIM" : "NAO"));
-    log("script slate-helper injetado? " +
-        (document.querySelector("script[data-dotti-slate-helper]") ? "SIM" : "NAO"));
-    if (panel) {
-        const ifr = panel.querySelector("iframe");
-        log("iframe do painel: " + (ifr ? ifr.src : "(nenhum — possivel bloqueio de CSP)"));
-    }
 
-    // ---------- 3. Raiz do app (acoplamento do content.css) ----------
+    // ---------- 6. Amostra do DOM real (pra eu escrever seletor novo) ----------
     hr();
-    log("3) RAIZ DO APP (content.css depende disso)");
+    log("6) AMOSTRA DO DOM REAL");
     hr();
-    log("#__next existe? " + (document.getElementById("__next") ? "SIM" : "*** NAO ***"));
-    log("[data-nextjs-scroll-focus-boundary] existe? " +
-        (document.querySelector("[data-nextjs-scroll-focus-boundary]") ? "SIM" : "NAO"));
     log("Filhos diretos do <body>:");
-    Array.from(document.body.children).slice(0, 12).forEach((c, i) => {
-        log(`   ${i}. ` + desc(c));
-    });
-
-    // ---------- 4. Seletores da automacao ----------
-    hr();
-    log("4) SELETORES QUE A AUTOMACAO USA");
-    hr();
-    dump("PROMPT (o mais critico)", '[role="textbox"]');
+    Array.from(document.body.children).slice(0, 10).forEach((c, i) => log(`   ${i}. ` + desc(c)));
     log("");
-    dump("Textarea legado", "#PINHOLE_TEXT_AREA_ELEMENT_ID");
-    dump("Textareas", "textarea");
-    log("");
-    dump("Comboboxes / modelo", 'button[role="combobox"], [role="combobox"]');
-    log("");
-    log("MODELO — botoes cujo texto casa /Veo\\s*3\\.\\d/ :");
+    log("Campo(s) contenteditable (onde se digita o prompt):");
     {
-        const encontrados = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'))
-            .filter(b => {
-                const t = (b.innerText || "").trim();
-                return t.length < 80 && /Veo\s*\d+(\.\d+)?/i.test(t);
-            });
-        if (!encontrados.length) log("   NENHUM — o pin /Veo 3.1/ do content.js nao acha nada");
-        encontrados.slice(0, 6).forEach((b, i) => log(`   ${i}. ` + desc(b)));
+        const eds = document.querySelectorAll('[contenteditable="true"]');
+        if (!eds.length) log("   NENHUM — voce esta dentro de um projeto?");
+        Array.from(eds).slice(0, 4).forEach((e, i) => log(`   ${i}. ` + desc(e)));
     }
     log("");
-    log("BOTOES com icone material (gerar / enviar / voltar):");
+    log("Botoes com aria-label (ate 15):");
     {
-        const icones = Array.from(document.querySelectorAll("i, span.material-icons, span.material-symbols-outlined"))
-            .filter(i => ["arrow_forward", "send", "arrow_upward", "arrow_back", "add", "settings", "tune"]
-                .includes((i.textContent || "").trim()));
-        if (!icones.length) log("   NENHUM icone material conhecido encontrado");
-        icones.slice(0, 12).forEach((i, n) =>
-            log(`   ${n}. icone="${(i.textContent || "").trim()}" -> botao: ` + desc(i.closest("button, [role=button], a") || i)));
+        const bs = document.querySelectorAll("button[aria-label]");
+        Array.from(bs).slice(0, 15).forEach((b, i) =>
+            log(`   ${i}. aria-label="${b.getAttribute("aria-label")}"  class="${(b.getAttribute("class") || "").slice(0, 50)}"`));
+        if (!bs.length) log("   NENHUM");
     }
-    log("");
-    dump("Grid de resultados", "[data-item-index]", 4);
-    dump("Tiles", "[data-tile-id]", 4);
-    dump("Dialogs abertos", '[role="dialog"]', 3);
     log("");
     log("VIDEOS na pagina:");
     {
-        const vids = Array.from(document.querySelectorAll("video"));
-        log(`   ${vids.length} <video> encontrado(s)`);
-        vids.slice(0, 5).forEach((v, i) => {
+        const vids = document.querySelectorAll("video");
+        log(`   ${vids.length} <video>`);
+        Array.from(vids).slice(0, 3).forEach((v, i) => {
             const src = v.src || (v.querySelector("source") || {}).src || "(sem src)";
-            log(`   ${i}. src=${src.slice(0, 130)}`);
-            log(`      tem getMediaUrlRedirect? ` + (src.includes("getMediaUrlRedirect") ? "SIM" : "NAO"));
+            log(`   ${i}. ${src.slice(0, 120)}`);
+            log(`      getMediaUrlRedirect? ` + (src.includes("getMediaUrlRedirect") ? "SIM" : "NAO"));
         });
     }
-    log("");
-    log("BOTOES de projeto (texto 'novo projeto'/'new project'):");
-    {
-        const b = Array.from(document.querySelectorAll("button, a, [role=button]"))
-            .filter(x => /novo projeto|new project|criar projeto|create project|new flow|novo flow/i
-                .test((x.innerText || "")));
-        if (!b.length) log("   NENHUM");
-        b.slice(0, 5).forEach((x, i) => log(`   ${i}. ` + desc(x)));
-    }
 
-    // ---------- 5. Body trocado? (checagem tardia) ----------
-    const bodyMarcado = document.body;
-    bodyMarcado.__dottiDiagMark = true;
-    const btnAntes = !!btn, panelAntes = !!panel;
+    // ---------- 7. Checagem tardia ----------
+    document.body.__dottiMark = true;
+    const btnAntes = !!btn;
 
     log("");
     hr();
-    log("Aguardando 5s para checar se o SPA troca o DOM...");
+    log("Aguardando 5s...");
     hr();
     console.log(out.join("\n"));
 
     setTimeout(() => {
-        const out2 = [];
-        const log2 = (s) => out2.push(s);
-        log2("");
-        log2("=".repeat(60));
-        log2("5) DEPOIS DE 5 SEGUNDOS");
-        log2("=".repeat(60));
-        log2("<body> foi substituido? " +
-            (document.body.__dottiDiagMark ? "NAO (mesmo nó)" : "*** SIM — o SPA trocou o body ***"));
+        const o2 = [];
+        o2.push("");
+        o2.push("=".repeat(64));
+        o2.push("7) DEPOIS DE 5 SEGUNDOS");
+        o2.push("=".repeat(64));
+        o2.push("<body> foi substituido? " +
+            (document.body.__dottiMark ? "NAO (mesmo no)" : "*** SIM — o SPA trocou o body ***"));
         const btn2 = document.getElementById("dotti-sender-toggle-btn");
-        const panel2 = document.getElementById("dotti-sender-full-panel");
-        log2(`Botao-raio: antes=${btnAntes ? "presente" : "ausente"} agora=${btn2 ? "presente" : "ausente"}` +
-            (btnAntes && !btn2 ? "  *** FOI REMOVIDO PELO SPA ***" : ""));
-        log2(`Sidebar   : antes=${panelAntes ? "presente" : "ausente"} agora=${panel2 ? "presente" : "ausente"}` +
-            (panelAntes && !panel2 ? "  *** FOI REMOVIDA PELO SPA ***" : ""));
-        log2("");
-        log2("FIM DO RELATORIO");
+        o2.push(`Botao-raio: antes=${btnAntes ? "presente" : "ausente"} agora=${btn2 ? "presente" : "ausente"}` +
+            (btnAntes && !btn2 ? "  *** REMOVIDO PELO SPA ***" : ""));
+        o2.push("");
+        o2.push("FIM DO RELATORIO");
 
-        const full = out.join("\n") + "\n" + out2.join("\n");
-        console.log(out2.join("\n"));
+        const full = out.join("\n") + "\n" + o2.join("\n");
+        console.log(o2.join("\n"));
         window.__dottiDiag = full;
         try {
             copy(full);
-            console.log("\n>>> Relatorio COPIADO pra area de transferencia. So colar na conversa. <<<");
+            console.log("\n>>> Relatorio COPIADO. So colar na conversa. <<<");
         } catch (e) {
-            console.log("\n>>> Nao consegui copiar sozinho. Rode:  copy(window.__dottiDiag)  <<<");
+            console.log("\n>>> Rode:  copy(window.__dottiDiag)  <<<");
         }
     }, 5000);
 })();

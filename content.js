@@ -3893,7 +3893,7 @@
                             if (freshUrl) return;
                             const src = video.src || video.querySelector("source")?.src;
                             if (!src) return;
-                            const isFlow = src.includes("storage.googleapis.com") || src.includes("labs.google") || src.includes("googleusercontent.com");
+                            const isFlow = src.includes("storage.googleapis.com") || src.includes("labs.google") || src.includes("flow.google.com") || src.includes("googleusercontent.com");
                             if (!isFlow) return;
                             // Verificar se este video pertence ao prompt (25 niveis)
                             let parent = video.parentElement;
@@ -4482,7 +4482,7 @@
                         if (freshUrl) return;
                         const src = video.src || video.querySelector("source")?.src;
                         if (!src) return;
-                        const isFlow = src.includes("storage.googleapis.com") || src.includes("labs.google") || src.includes("googleusercontent.com");
+                        const isFlow = src.includes("storage.googleapis.com") || src.includes("labs.google") || src.includes("flow.google.com") || src.includes("googleusercontent.com");
                         if (!isFlow) return;
                         let parent = video.parentElement;
                         for (let i = 0; i < 25 && parent; i++) {
@@ -4538,8 +4538,15 @@
     let _initDone = false;
     let _reinjectTimer = null;
 
+    // v3.3.0: o Flow migrou de labs.google/fx/tools/flow para flow.google.com.
+    // Aceita os dois enquanto a URL antiga ainda redirecionar.
+    function _isFlowHost() {
+        const h = window.location.hostname;
+        return h === "flow.google.com" || h === "labs.google";
+    }
+
     function ensureInjected() {
-        if (!window.location.href.includes("labs.google")) return;
+        if (!_isFlowHost()) return;
         if (!document.body) return;
 
         // Botao-raio
@@ -4612,7 +4619,7 @@
     }
 
     function init() {
-        if (!window.location.href.includes("labs.google")) return;
+        if (!_isFlowHost()) return;
         if (_initDone) return;
         _initDone = true;
 
