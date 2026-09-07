@@ -1871,6 +1871,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     break;
                 }
 
+                // v3.4.0: a aba Video passou a baixar pelo menu nativo do Flow
+                // (o DOM Angular nao expoe mais a URL do video), entao o content
+                // avisa ANTES de clicar e o listener renomeia o que o Flow
+                // disparar. Reusa a mesma fila do Estender.
+                case "EXPECT_DOWNLOAD": {
+                    const { filename, folder } = message;
+                    if (!filename) { sendResponse({ success: false, error: "no_filename" }); break; }
+                    const full = folder ? folder + "/" + filename : filename;
+                    _installExtendDownloadListener({ fullName: full, folder: folder || "" });
+                    console.log("[Dotti] Download esperado:", full);
+                    sendResponse({ success: true });
+                    break;
+                }
+
                 case "DOWNLOAD_VIDEO": {
                     const { url, filename, folder } = message;
                     if (!url) { sendResponse({ success: false, error: "no_url" }); break; }
@@ -2430,9 +2444,14 @@ function _installExtendDownloadListener(pending) {
 
             const next = _extendDownloadQueue.shift();
             const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
-            const newName = (next.folder || 'LetzScenes') + '/' +
-                'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
-                '_' + next.totalSeconds + 's.' + ext;
+            // v3.4.0: a aba Video enfileira com fullName ja pronto (o nome sai
+            // do prompt correspondente). O Estender continua sem fullName e
+            // mantem o padrao SCENE_NNN_Xs.
+            const newName = next.fullName
+                ? (next.fullName.replace(/\.[a-z0-9]+$/i, "") + "." + ext)
+                : ((next.folder || 'LetzScenes') + '/' +
+                    'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
+                    '_' + next.totalSeconds + 's.' + ext);
 
             console.log('[Extend] cancelando download nativo id=' + item.id +
                 ' url=' + url.substring(0, 80));

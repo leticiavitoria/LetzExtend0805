@@ -1864,6 +1864,131 @@
         return url.split('?')[0];
     }
 
+    // ============================================
+    // v3.4.0 — DOWNLOAD PELO MENU NATIVO (Flow Angular)
+    // ============================================
+    // O DOM novo nao expoe mais a URL do video: um projeto com 18 videos tem
+    // zero <video>, so <img class="thumbnail">. Entao o caminho e o mesmo do
+    // usuario: more_vert do tile -> "Fazer o download" -> resolucao.
+    // O background renomeia o arquivo que o Flow disparar (EXPECT_DOWNLOAD).
+
+    // Resolucoes do submenu, capturadas no DOM:
+    //   "270p GIF animado" | "720p Tamanho original"
+    //   "1080p Aprimorada" | "4K Resolucao ampliada - 50 creditos"
+    // 720p = arquivo original sem re-encode, que era o comportamento antigo.
+    // NUNCA clicar no 4K: consome 50 creditos por video.
+    const _QUALIDADE_ALVO = /^\s*720p\b/i;
+    const _QUALIDADE_PROIBIDA = /\b4K\b|cr[eé]dito/i;
+
+    // O mesmo menu aparece em 3 containers aninhados (cdk-overlay-pane >
+    // mat-mdc-menu-panel > mat-mdc-menu-content), entao [role=menuitem] cru
+    // devolve cada item 3x. Deduplica por texto.
+    function _itensDeMenu() {
+        const vistos = new Set();
+        return Array.from(document.querySelectorAll('[role="menuitem"]'))
+            .filter(it => {
+                const chave = (it.innerText || "").trim();
+                if (!chave || vistos.has(chave)) return false;
+                vistos.add(chave);
+                return true;
+            });
+    }
+
+    function _clicarReal(el) {
+        const r = el.getBoundingClientRect();
+        const o = {
+            bubbles: true, cancelable: true, view: window,
+            clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+            button: 0, detail: 1
+        };
+        el.dispatchEvent(new PointerEvent("pointerdown", o));
+        el.dispatchEvent(new MouseEvent("mousedown", o));
+        el.dispatchEvent(new PointerEvent("pointerup", o));
+        el.dispatchEvent(new MouseEvent("mouseup", o));
+        el.dispatchEvent(new MouseEvent("click", o));
+    }
+
+    async function _esperarItem(pred, timeoutMs) {
+        const ate = Date.now() + (timeoutMs || 3000);
+        while (Date.now() < ate) {
+            const achado = _itensDeMenu().find(pred);
+            if (achado) return achado;
+            await sleep(150);
+        }
+        return null;
+    }
+
+    function _fecharMenus() {
+        try {
+            document.body.dispatchEvent(new KeyboardEvent("keydown", {
+                key: "Escape", code: "Escape", keyCode: 27, bubbles: true
+            }));
+        } catch (e) { }
+    }
+
+    // Um tile pronto tem o more_vert; os que ainda estao gerando nao tem.
+    function _tilesProntos() {
+        return Array.from(document.querySelectorAll("flow-grid-tile-container"))
+            .filter(t => t.querySelector('button[aria-haspopup="menu"]'));
+    }
+
+    function _moreVertDoTile(tile) {
+        const bs = Array.from(tile.querySelectorAll("button"));
+        return bs.find(b => {
+            const ic = b.querySelector("mat-icon");
+            return ic && ic.textContent.trim() === "more_vert";
+        }) || bs.find(b => b.getAttribute("aria-haspopup") === "menu") || null;
+    }
+
+    // Navega more_vert -> download -> resolucao. Retorna true se clicou.
+    async function baixarTilePeloMenu(tile) {
+        const mv = _moreVertDoTile(tile);
+        if (!mv) {
+            console.log("[Dotti Download] Tile sem more_vert — ainda gerando?");
+            return false;
+        }
+
+        _fecharMenus();
+        await sleep(150);
+        _clicarReal(mv);
+
+        // "Fazer o download" — ancora no ICONE, nao no texto: o rotulo vem
+        // traduzido. E NAO pode ser por aria-haspopup: "Adicionar ao cenario"
+        // tambem tem haspopup=menu e vem antes na ordem do menu.
+        const itemDl = await _esperarItem(it => {
+            const ic = it.querySelector("mat-icon");
+            return ic && ic.textContent.trim() === "download";
+        }, 3000);
+
+        if (!itemDl) {
+            console.log("[Dotti Download] Item de download nao apareceu no menu");
+            _fecharMenus();
+            return false;
+        }
+
+        _clicarReal(itemDl);
+
+        // Submenu de resolucoes — aqui os itens NAO tem icone, entao a ancora
+        // e o texto. "720p" e numero, nao muda com o idioma.
+        const itemQual = await _esperarItem(it => {
+            const t = (it.innerText || "").trim();
+            return _QUALIDADE_ALVO.test(t) && !_QUALIDADE_PROIBIDA.test(t);
+        }, 3000);
+
+        if (!itemQual) {
+            const disponiveis = _itensDeMenu().map(i => (i.innerText || "").trim());
+            console.log("[Dotti Download] 720p nao encontrado. Opcoes:", disponiveis);
+            _fecharMenus();
+            return false;
+        }
+
+        console.log("[Dotti Download] Clicando:", (itemQual.innerText || "").trim());
+        _clicarReal(itemQual);
+        await sleep(400);
+        _fecharMenus();
+        return true;
+    }
+
     function startVideoUrlScanner() {
         if (_scannerActive) return;
         _scannerActive = true;
@@ -3285,6 +3410,85 @@
         if (downloadsToQueue.length > 0) {
             await _processDownloadQueue(downloadsToQueue);
         }
+
+        // v3.4.0: fallback pro DOM Angular. A varredura acima depende de
+        // <video> com getMediaUrlRedirect no src, que nao existe mais — um
+        // projeto com 18 videos tem zero <video>. Quando ela nao acha nada,
+        // cai pro caminho dos tiles + menu nativo.
+        if (downloadsToQueue.length === 0) {
+            await _scanTilesParaDownload();
+        }
+    }
+
+    // Tiles ja baixados nesta sessao, por aria-label (o tile nao tem id de
+    // midia: nem href, nem data-*; o unico identificador e o aria-label, que
+    // traz o prompt truncado).
+    const _tilesBaixados = new Set();
+
+    async function _scanTilesParaDownload() {
+        if (!_autoDownload) return;
+
+        const tiles = _tilesProntos();
+        if (!tiles.length) {
+            // Log explicito: o silencio de antes foi o que escondeu a falha.
+            const todos = document.querySelectorAll("flow-grid-tile-container").length;
+            console.log('[Dotti Scanner] Nenhum tile pronto (' + todos + ' tile(s) no DOM)');
+            return;
+        }
+
+        for (const tile of tiles) {
+            const rotulo = (tile.getAttribute("aria-label") || "").trim();
+            if (!rotulo || _tilesBaixados.has(rotulo)) continue;
+
+            // Casa o tile com o prompt pelo inicio do texto — o aria-label vem
+            // truncado com reticencias, entao a comparacao e por prefixo.
+            const base = rotulo.replace(/[.…]+$/, "").trim().toLowerCase();
+            const prompt = _promptList.find(p => {
+                const t = (p.text || "").trim().toLowerCase();
+                return t && base.length > 10 && t.startsWith(base.substring(0, 30));
+            });
+
+            if (!prompt) {
+                console.log('[Dotti Scanner] Tile sem prompt correspondente:', rotulo.substring(0, 50));
+                continue;
+            }
+
+            const filename = _nomeArquivoDoPrompt(prompt, prompt.foundVideos + 1);
+            console.log('[Dotti Scanner] Baixando tile #' + prompt.number + ' -> ' + filename);
+
+            // Avisa o background ANTES de clicar: o download vem do Flow e o
+            // listener renomeia o proximo que aparecer.
+            try {
+                await chrome.runtime.sendMessage({
+                    action: 'EXPECT_DOWNLOAD',
+                    filename: filename,
+                    folder: _downloadFolder
+                });
+            } catch (e) {
+                console.warn('[Dotti Scanner] EXPECT_DOWNLOAD falhou:', e.message);
+                continue;
+            }
+
+            const ok = await baixarTilePeloMenu(tile);
+            if (ok) {
+                _tilesBaixados.add(rotulo);
+                prompt.foundVideos = (prompt.foundVideos || 0) + 1;
+                if (prompt.foundVideos >= prompt.expectedVideos) {
+                    prompt.downloaded = true;
+                    prompt.status = 'complete';
+                }
+                notifyPanel({
+                    type: 'VIDEO_DOWNLOADED',
+                    data: {
+                        promptNumber: prompt.number,
+                        mediaId: null,
+                        url: null,
+                        downloadFolder: _downloadFolder
+                    }
+                });
+            }
+            await sleep(1200); // respiro entre downloads
+        }
     }
 
     async function _processDownloadQueue(downloads) {
@@ -3299,37 +3503,43 @@
     // Filename: 001.a.prompt text.mp4
     // Retorna Promise para permitir await na fila de downloads
     // ============================================
+    // v3.4.0: extraido de downloadVideoDirect para o caminho do menu nativo
+    // reusar exatamente o mesmo padrao de nome (001_prompt.mp4).
+    function _nomeArquivoDoPrompt(prompt, letterIndex) {
+        const promptNum = prompt.number || 0;
+        const ext = _mediaType === 'image' ? 'png' : 'mp4';
+
+        const promptText = (prompt.text || 'video').trim();
+        const sanitizedPrompt = promptText
+            .substring(0, 60)
+            .replace(/[<>:"|?*\\\/]/g, '')
+            .replace(/\s+/g, '_')
+            .replace(/\.+$/, '')
+            .trim();
+
+        let letterSuffix = '';
+        if (prompt.expectedVideos > 1 && letterIndex) {
+            const letters = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+            const idx = Math.max(0, letterIndex - 1);
+            letterSuffix = letters[idx % letters.length] + '.';
+        }
+
+        const paddedNum = String(promptNum).padStart(3, '0');
+
+        // v3.1.0: Version suffix para retries (001.v2.a.prompt.mp4)
+        let versionSuffix = '';
+        if (prompt.isRetry) {
+            const version = prompt.retryCount || 1;
+            versionSuffix = '.v' + (version + 1);
+        }
+
+        const connector = letterSuffix ? '.' + letterSuffix : '_';
+        return paddedNum + versionSuffix + connector + sanitizedPrompt + '.' + ext;
+    }
+
     function downloadVideoDirect(url, prompt, letterIndex) {
         return new Promise((resolve) => {
-            const promptNum = prompt.number || 0;
-            const ext = _mediaType === 'image' ? 'png' : 'mp4';
-
-            const promptText = (prompt.text || 'video').trim();
-            const sanitizedPrompt = promptText
-                .substring(0, 60)
-                .replace(/[<>:"|?*\\\/]/g, '')
-                .replace(/\s+/g, '_')
-                .replace(/\.+$/, '')
-                .trim();
-
-            let letterSuffix = '';
-            if (prompt.expectedVideos > 1 && letterIndex) {
-                const letters = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
-                const idx = Math.max(0, letterIndex - 1);
-                letterSuffix = letters[idx % letters.length] + '.';
-            }
-
-            const paddedNum = String(promptNum).padStart(3, '0');
-
-            // v3.1.0: Version suffix para retries (001.v2.a.prompt.mp4)
-            let versionSuffix = '';
-            if (prompt.isRetry) {
-                const version = prompt.retryCount || 1;
-                versionSuffix = '.v' + (version + 1);
-            }
-
-            const connector = letterSuffix ? '.' + letterSuffix : '_';
-            const filename = paddedNum + versionSuffix + connector + sanitizedPrompt + '.' + ext;
+            const filename = _nomeArquivoDoPrompt(prompt, letterIndex);
 
             console.log('[Dotti Download]', _downloadFolder + '/' + filename);
 
@@ -3349,7 +3559,8 @@
                     return;
                 }
                 if (response?.success) {
-                    console.log('[Dotti Download] OK: #' + paddedNum);
+                    console.log('[Dotti Download] OK: #' +
+                        String(prompt?.number || 0).padStart(3, '0'));
                     resolve(true);
                 } else if (response?.error) {
                     console.warn('[Dotti Download] Erro:', response.error);
