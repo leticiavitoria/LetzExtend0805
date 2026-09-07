@@ -345,7 +345,7 @@
         console.log("[Dotti DOM] Limpando elementos do prompt (area do textbox)...");
 
         // Encontrar a area do textbox para limitar a busca
-        const textarea = document.querySelector("[role='textbox']");
+        const textarea = _findPromptBox();
         if (!textarea) {
             console.log("[Dotti DOM] Textbox nao encontrado, pulando limpeza");
             return;
@@ -518,9 +518,29 @@
         });
     }
 
+    // v3.3.0: localizador unico do campo de prompt.
+    // O Flow migrou de Slate.js para ProseMirror junto com a troca de
+    // React -> Angular. Confirmado no DOM: o campo agora e
+    // div.ProseMirror[contenteditable="true"] e nao tem mais role="textbox".
+    // A ordem importa: ProseMirror primeiro, Slate e textarea ficam como
+    // fallback caso o Google reverta ou sirva versoes diferentes.
+    function _findPromptBox() {
+        return document.querySelector('div.ProseMirror[contenteditable="true"]')
+            || document.querySelector('.ProseMirror[contenteditable="true"]')
+            || document.querySelector("[role='textbox']")
+            || document.querySelector("#PINHOLE_TEXT_AREA_ELEMENT_ID");
+    }
+
+    // ProseMirror gerencia o proprio estado: escrever em textContent e
+    // revertido no proximo ciclo. So entrada sintetica via execCommand vale.
+    function _isProseMirror(el) {
+        return !!el && el.classList && el.classList.contains("ProseMirror");
+    }
+
     // Helper: verifica se o input de prompt esta vazio
     function isPromptInputEmpty() {
-        const ta = document.querySelector("[role='textbox']");
+        const ta = _findPromptBox();
+        if (ta && ta.tagName === "TEXTAREA") return !ta.value || ta.value.length === 0;
         if (ta) {
             const text = (ta.textContent || '').replace(/\u200B/g, '').trim();
             if (text.length === 0) return true;
@@ -535,8 +555,68 @@
     async function fillTextarea(text) {
         console.log("[Dotti DOM] Preenchendo textarea...");
 
-        // === NOVO FLOW: Slate.js via slate-helper.js (MAIN world) ===
-        const textbox = document.querySelector("[role='textbox']");
+        const box = _findPromptBox();
+
+        // === FLOW ANGULAR: ProseMirror ===
+        // Nao passa pelo slate-helper: a API do Slate nao existe aqui. E nao
+        // se escreve em textContent — o ProseMirror descarta e volta ao estado
+        // anterior. O caminho que funciona e entrada sintetica via execCommand,
+        // que dispara beforeinput nativo e o editor absorve normalmente.
+        if (_isProseMirror(box)) {
+            console.log("[Dotti DOM] Campo ProseMirror encontrado, preenchendo...");
+
+            dispatchFullClick(box);
+            await sleep(150);
+            box.focus();
+            await sleep(100);
+
+            // Seleciona tudo que ja esta la e apaga
+            const rangePM = document.createRange();
+            rangePM.selectNodeContents(box);
+            const selPM = window.getSelection();
+            selPM.removeAllRanges();
+            selPM.addRange(rangePM);
+            await sleep(50);
+            document.execCommand("delete", false, null);
+            await sleep(50);
+
+            let okPM = document.execCommand("insertText", false, text);
+
+            // Se execCommand falhar, tenta evento de colagem — ProseMirror
+            // tem handler proprio de paste e aceita texto por ali.
+            let escrito = (box.textContent || "").replace(/\u200B/g, "").trim();
+            if (!okPM || !escrito) {
+                console.log("[Dotti DOM] execCommand falhou, tentando paste sintetico...");
+                try {
+                    const dt = new DataTransfer();
+                    dt.setData("text/plain", text);
+                    box.dispatchEvent(new ClipboardEvent("paste", {
+                        clipboardData: dt, bubbles: true, cancelable: true
+                    }));
+                    await sleep(200);
+                    escrito = (box.textContent || "").replace(/\u200B/g, "").trim();
+                } catch (e) {
+                    console.log("[Dotti DOM] paste sintetico falhou:", e.message);
+                }
+            }
+
+            await sleep(250);
+            escrito = (box.textContent || "").replace(/\u200B/g, "").trim();
+            if (escrito.length > 0 && !escrito.includes("O que voc") && !escrito.includes("What do you")) {
+                console.log("[Dotti DOM] ProseMirror preenchido OK:", escrito.substring(0, 40));
+                return true;
+            }
+
+            console.log("[Dotti DOM] Falha ao preencher ProseMirror (texto lido: '" + escrito.substring(0, 40) + "')");
+            return false;
+        }
+
+        // === FLOW ANTIGO: Slate.js via slate-helper.js (MAIN world) ===
+        // So entra aqui num contenteditable de verdade: _findPromptBox() tambem
+        // sabe devolver o <textarea> legado, e o caminho do Slate assume
+        // contenteditable — cairia em erro silencioso.
+        const textbox = box && box.getAttribute && box.getAttribute("contenteditable") === "true"
+            ? box : null;
         if (textbox) {
             console.log("[Dotti DOM] Textbox Slate encontrado, enviando para slate-helper.js...");
 
@@ -662,12 +742,20 @@
     // v3.1.0: Encontrar botao submit do Flow
     function findSubmitButton() {
         const SUBMIT_ICONS = ["arrow_forward", "send", "arrow_upward"];
-        const tb = document.querySelector("[role='textbox']");
+
+        // Estrategia 0 (v3.3.0): classe do Flow Angular. Confirmada no DOM e,
+        // por ser nome de classe, nao muda com o idioma da interface — ao
+        // contrario de aria-label, que vem traduzido ("Iniciar geracao").
+        const porClasse = document.querySelector("button.generate-icon-button");
+        if (porClasse && porClasse.offsetParent !== null) return porClasse;
+
+        const tb = _findPromptBox();
         const tbRect = tb ? tb.getBoundingClientRect() : null;
         const buttons = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null);
 
         // Estrategia 1: aria-label especifico
-        const ariaLabels = ["Create", "Criar", "Send", "Enviar", "Generate", "Gerar", "Submit"];
+        const ariaLabels = ["Create", "Criar", "Send", "Enviar", "Generate", "Gerar", "Submit",
+            "Iniciar geracao", "Iniciar geração"];
         for (const lab of ariaLabels) {
             const b = buttons.find(b => {
                 const al = b.getAttribute("aria-label") || "";
@@ -682,7 +770,7 @@
             let nearest = null;
             let nearestDist = Infinity;
             for (const b of buttons) {
-                const ic = b.querySelector("i");
+                const ic = b.querySelector("mat-icon, i, span.material-icons, span.material-symbols-outlined");
                 const t = ic?.textContent?.trim();
                 if (!SUBMIT_ICONS.includes(t)) continue;
                 const r = b.getBoundingClientRect();
@@ -698,7 +786,7 @@
 
         // Estrategia 3 (ultimo recurso): primeiro arrow_forward/send/arrow_upward visivel
         for (const b of buttons) {
-            const ic = b.querySelector("i");
+            const ic = b.querySelector("mat-icon, i, span.material-icons, span.material-symbols-outlined");
             const t = ic?.textContent?.trim();
             if (SUBMIT_ICONS.includes(t)) return b;
         }
@@ -794,7 +882,7 @@
 
         // Strategy 4: Enter key
         console.log("[Dotti DOM] Tentando Enter key...");
-        const textbox = document.querySelector("[role='textbox']");
+        const textbox = _findPromptBox();
         if (textbox) {
             textbox.focus();
             textbox.dispatchEvent(new KeyboardEvent('keydown', {
@@ -1511,7 +1599,7 @@
 
         // Estrategia 2: Material icon text → closest button
         if (opts.materialIcon) {
-            const icons = document.querySelectorAll('i, span.material-icons, span.material-icons-outlined, span.material-symbols-outlined');
+            const icons = document.querySelectorAll('mat-icon, i, span.material-icons, span.material-icons-outlined, span.material-symbols-outlined');
             for (const icon of icons) {
                 if (icon.textContent?.trim() === opts.materialIcon) {
                     const btn = icon.closest('button') || icon.closest('a') || icon.parentElement;
@@ -4767,7 +4855,7 @@
     }
 
     function _findModelDropdownTrigger() {
-        const tb = document.querySelector('[role="textbox"]');
+        const tb = _findPromptBox();
         const tbRect = tb && _isVisible(tb) ? tb.getBoundingClientRect() : null;
         const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
         const matches = [];

@@ -33,7 +33,7 @@
       return;
     }
 
-    var ta = document.querySelector("[role='textbox']");
+    var ta = (document.querySelector('div.ProseMirror[contenteditable="true"]') || document.querySelector("[role='textbox']"));
     if (!ta) {
       _dispatch('dotti-fill-slate-result', { requestId: requestId, result: 'NO_TEXTBOX' });
       return;
@@ -100,7 +100,7 @@
     // Find submit button — preferir aria-label, depois icone MAIS PROXIMO do textbox
     var SUBMIT_ICONS = ['arrow_forward', 'send', 'arrow_upward'];
     var ARIA_LABELS = ['Create', 'Criar', 'Send', 'Enviar', 'Generate', 'Gerar', 'Submit'];
-    var tb = document.querySelector("[role='textbox']");
+    var tb = (document.querySelector('div.ProseMirror[contenteditable="true"]') || document.querySelector("[role='textbox']"));
     var tbRect = tb ? tb.getBoundingClientRect() : null;
     // v3.6.0: Inclui [role="button"] (Flow pode ter trocado <button> por div role=button)
     var allBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter(function(b) { return b.offsetParent !== null; });
@@ -110,7 +110,7 @@
     // Diagnostico: lista candidatos com icone de submit
     var submitCandidates = [];
     for (var di = 0; di < allBtns.length; di++) {
-      var dic = allBtns[di].querySelector('i');
+      var dic = allBtns[di].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
       var dt = dic ? (dic.textContent || '').trim() : '';
       var dal = allBtns[di].getAttribute('aria-label') || '';
       if (SUBMIT_ICONS.indexOf(dt) >= 0 || dal) {
@@ -123,6 +123,11 @@
       }
     }
     console.log('[DottiSlateHelper] Submit candidates:', JSON.stringify(submitCandidates));
+
+    // Estrategia 0 (v3.3.0): classe do Flow Angular. Nao muda com o idioma,
+    // ao contrario de aria-label, que vem traduzido ("Iniciar geracao").
+    var byClass = document.querySelector('button.generate-icon-button');
+    if (byClass && byClass.offsetParent !== null) { btn = byClass; pickReason = 'class=generate-icon-button'; }
 
     // Estrategia 1: aria-label
     for (var ai = 0; ai < ARIA_LABELS.length && !btn; ai++) {
@@ -141,7 +146,7 @@
       var nearest = null;
       var nearestDist = Infinity;
       for (var ni = 0; ni < allBtns.length; ni++) {
-        var nic = allBtns[ni].querySelector('i');
+        var nic = allBtns[ni].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
         var nt = nic ? (nic.textContent || '').trim() : '';
         if (SUBMIT_ICONS.indexOf(nt) < 0) continue;
         var nr = allBtns[ni].getBoundingClientRect();
@@ -157,7 +162,7 @@
     // Estrategia 3: primeiro icone submit visivel (ultimo recurso)
     if (!btn) {
       for (var fi = 0; fi < allBtns.length; fi++) {
-        var fic = allBtns[fi].querySelector('i');
+        var fic = allBtns[fi].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
         var ft = fic ? (fic.textContent || '').trim() : '';
         if (SUBMIT_ICONS.indexOf(ft) >= 0) { btn = allBtns[fi]; pickReason = 'fallback-first-icon'; break; }
       }
@@ -169,7 +174,7 @@
       return;
     }
 
-    var pickedIcon = (btn.querySelector('i')?.textContent || '').trim();
+    var pickedIcon = (btn.querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined')?.textContent || '').trim();
     var pickedAria = btn.getAttribute('aria-label') || '';
     var pickedRect = btn.getBoundingClientRect();
     var pickedDx = tbRect ? Math.round(pickedRect.left - tbRect.right) : null;
@@ -220,7 +225,7 @@
   // ====== CHECK SLATE STATE ======
   document.addEventListener('dotti-check-slate', function(e) {
     var requestId = (e.detail && e.detail.requestId) || '';
-    var ta = document.querySelector("[role='textbox']");
+    var ta = (document.querySelector('div.ProseMirror[contenteditable="true"]') || document.querySelector("[role='textbox']"));
     if (!ta) {
       _dispatch('dotti-check-slate-result', { requestId: requestId, isEmpty: true, hasEditor: false });
       return;
@@ -269,14 +274,14 @@
     var requestId = (e.detail && e.detail.requestId) || '';
 
     var allBtns = Array.from(document.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
-    var tb = document.querySelector("[role='textbox']");
+    var tb = (document.querySelector('div.ProseMirror[contenteditable="true"]') || document.querySelector("[role='textbox']"));
     var tbRect = tb ? tb.getBoundingClientRect() : null;
     var tbY = tbRect ? tbRect.top : 0;
 
     // DEBUG: Listar todos os botoes visiveis com icones perto do textbox
     var btnDebug = [];
     for (var d = 0; d < allBtns.length; d++) {
-      var dbIcon = allBtns[d].querySelector('i');
+      var dbIcon = allBtns[d].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
       if (!dbIcon) continue;
       var dbText = dbIcon.textContent.trim();
       var dbRect = allBtns[d].getBoundingClientRect();
@@ -291,7 +296,7 @@
 
     // Prioridade 1: icone "add_2" (botao especifico da galeria na v2.0.3)
     for (var i = 0; i < allBtns.length; i++) {
-      var icon = allBtns[i].querySelector('i');
+      var icon = allBtns[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
       if (icon && icon.textContent.trim() === 'add_2') {
         addBtn = allBtns[i];
         console.log('[DottiSlateHelper] Encontrado add_2');
@@ -306,7 +311,7 @@
       for (var gi = 0; gi < galleryIcons.length; gi++) {
         if (addBtn) break;
         for (var j = 0; j < allBtns.length; j++) {
-          var ic = allBtns[j].querySelector('i');
+          var ic = allBtns[j].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
           if (!ic) continue;
           var t = ic.textContent.trim();
           if (t !== galleryIcons[gi]) continue;
@@ -341,7 +346,7 @@
     }
 
     var iconText = '';
-    var btnIcon = addBtn.querySelector('i');
+    var btnIcon = addBtn.querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
     if (btnIcon) iconText = btnIcon.textContent.trim();
     console.log('[DottiSlateHelper] Clicando botao galeria:', iconText);
 
@@ -515,7 +520,7 @@
 
     var btns = dialog.querySelectorAll('button');
     for (var i = 0; i < btns.length; i++) {
-      var icon = btns[i].querySelector('i');
+      var icon = btns[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
       var t = icon ? icon.textContent.trim() : '';
       if (t === 'close' || t === 'done' || t === 'check') {
         btns[i].click();
@@ -611,7 +616,9 @@
     var allBtns = Array.from(document.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
     var cropBtn = null;
     for (var i = 0; i < allBtns.length; i++) {
-      var icon = allBtns[i].querySelector('i');
+      // v3.3.0: no Flow Angular os icones sao <mat-icon>, nao <i>. O crop_16_9
+      // existia na pagina o tempo todo — a busca e que olhava a tag errada.
+      var icon = allBtns[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
       if (icon && (icon.textContent.trim() === 'crop_16_9' || icon.textContent.trim() === 'crop_9_16')) {
         cropBtn = allBtns[i];
         break;
@@ -635,7 +642,7 @@
       // Debug: list visible buttons
       var btnList = [];
       for (var d = 0; d < refreshedBtns.length; d++) {
-        var di = refreshedBtns[d].querySelector('i');
+        var di = refreshedBtns[d].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
         if (di) btnList.push(di.textContent.trim() + '(' + (refreshedBtns[d].getAttribute('data-state') || '') + ')');
       }
       console.log('[DottiSlateHelper] Buttons after open:', btnList.join(', '));
@@ -653,7 +660,7 @@
         // Preferir botoes do popup (data-state active/inactive). Outros videocam/image
         // que aparecem em sidebar/galeria usam outros estados (closed) e devem ser ignorados.
         for (var j = 0; j < refreshedBtns.length; j++) {
-          var ic = refreshedBtns[j].querySelector('i');
+          var ic = refreshedBtns[j].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
           if (!ic) continue;
           var icText = ic.textContent.trim();
           if (targetAlts.indexOf(icText) < 0) continue;
