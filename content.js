@@ -2160,80 +2160,37 @@
         switch (errorType) {
 
             case 'TIMEOUT': {
-                // v3.1.0: Timeout retry mid-queue — cria NOVA task retry com prioridade
-                console.log('[Dotti] [' + formatPromptId(task) + '] Timeout detectado - Geracao esta demorando');
+                // v3.5.0: NAO reenvia mais. A regra e explicita: reenvio so sob
+                // autorizacao da usuaria, e so depois de toda a lista enviada.
+                //
+                // O comportamento antigo criava aqui uma NOVA task de retry e a
+                // inseria com prioridade na fila — foi isso que reenviou o
+                // prompt 6 depois do 25 e o 24 depois do 38. E reenviar nem
+                // resolvia: o video original JA ESTAVA pronto, so tinha saido da
+                // janela virtual da grade, entao o scan nao o via (o
+                // scrollToRevealMore estava quebrado e nunca rolava a grade).
+                //
+                // Agora o timeout so significa "parei de segurar o slot por
+                // este". A task vai para aguardando_verificacao: continua sendo
+                // procurada pela varredura e pode ser baixada a qualquer momento,
+                // mas nunca volta para a fila de envio.
+                console.log('[Dotti] [' + formatPromptId(task) +
+                    '] Demorou mais que o normal — liberando slot, SEM reenviar. ' +
+                    'A varredura continua procurando este video.');
 
-                // Libera slot da task original
                 _activeSlots--;
                 const timeoutSlotToFree = _slots.findIndex(s => s === task.uuid);
                 if (timeoutSlotToFree !== -1) {
                     _slots[timeoutSlotToFree] = null;
                 }
 
-                // Verificar se ja teve timeout retry (limite: 1 segunda chance)
-                if (!task.timeoutRetryCount || task.timeoutRetryCount < 1) {
-                    // Marcar task original como failed
-                    task.status = 'failed';
-                    task.error = 'Timeout - retry criado';
+                task.status = 'aguardando_verificacao';
+                task.aguardandoDesde = Date.now();
 
-                    // Criar NOVA task retry
-                    const retryIdx = _promptList.length;
-                    const retryTask = {
-                        index: retryIdx,
-                        number: task.number,
-                        text: task.text,
-                        prompt: task.prompt || task.text,
-                        elements: task.elements || [],
-                        status: 'pending',
-                        uuid: null,
-                        mediaId: null,
-                        retryCount: (task.retryCount || 0) + 1,
-                        highDemandRetryCount: 0,
-                        techRetryCount: 0,
-                        isRetry: true,
-                        isTimeoutRetry: true,
-                        timeoutRetryCount: (task.timeoutRetryCount || 0) + 1,
-                        originalIndex: task.originalIndex != null ? task.originalIndex : task.index,
-                        downloadIndex: task.downloadIndex || task.index,
-                        startedAt: null,
-                        lastSubmitTime: null,
-                        foundVideos: 0,
-                        expectedVideos: task.expectedVideos || 1,
-                        downloaded: false,
-                        failType: null,
-                        error: null,
-                        needsRetryAfterSystemError: false,
-                        hasImage: task.hasImage || false,
-                        image: task.image || null
-                    };
-
-                    // Inserir com prioridade: antes do proximo pending nao-retry
-                    let insertPos = _promptList.length;
-                    for (let pi = 0; pi < _promptList.length; pi++) {
-                        if (_promptList[pi].status === 'pending' && !_promptList[pi].isRetry) {
-                            insertPos = pi;
-                            break;
-                        }
-                    }
-                    _promptList.splice(insertPos, 0, retryTask);
-
-                    // Re-indexar tasks apos splice
-                    for (let ri = insertPos; ri < _promptList.length; ri++) {
-                        _promptList[ri].index = ri;
-                    }
-
-                    console.log('[Dotti] [' + formatPromptId(task) + '] Timeout retry criado na posicao ' + insertPos + ' (mid-queue)');
-                    notifyPanel({ type: 'ERROR_RETRY', data: { number: task.number, errorType: 'TIMEOUT', retryCount: retryTask.retryCount, maxRetries: MAX_RETRIES } });
-
-                    await sleep(3000);
-                } else {
-                    // Ja usou a segunda chance — falha definitiva
-                    task.status = 'failed';
-                    task.error = 'Timeout apos retry mid-queue';
-
-                    console.log('[Dotti] [' + formatPromptId(task) + '] Falha definitiva: Timeout apos retry mid-queue');
-                    notifyPanel({ type: 'PROMPT_FAILED', data: { number: task.number, failType: 'TIMEOUT', error: task.error } });
-                }
+                notifyPanel({
+                    type: 'PROMPT_STATUS',
+                    data: { number: task.number, status: 'aguardando_verificacao' }
+                });
                 break;
             }
 
@@ -2772,7 +2729,11 @@
         }
 
         // Processa retries de timeout criados durante a espera final
-        const pendingRetries = _promptList.filter(t => t.status === 'pending' && t.isTimeoutRetry);
+        // v3.5.0: nenhuma task recebe mais isTimeoutRetry (o case TIMEOUT
+        // deixou de criar retry), entao esta lista fica sempre vazia. Mantida
+        // como guarda: se algum caminho futuro marcar a flag, o reenvio segue
+        // desligado enquanto a fila estiver ativa.
+        const pendingRetries = [];
         if (pendingRetries.length > 0 && !_stopRequested) {
             console.log('[Dotti] Processando ' + pendingRetries.length + ' retry(s) de timeout...');
 
@@ -2807,6 +2768,47 @@
                 console.log('[Dotti] [' + formatPromptId(task) + '] Falha definitiva apos retry de timeout');
                 notifyPanel({ type: 'PROMPT_FAILED', data: { number: task.number, failType: 'TIMEOUT', error: task.error } });
             }
+        }
+
+        // v3.5.0: periodo de graca. Toda a lista ja foi enviada; agora e so dar
+        // tempo da varredura descer a grade e alcancar os videos que ficaram
+        // prontos por ultimo. Nada e reenviado aqui — so procurado e baixado.
+        const aguardando = () => _promptList.filter(t =>
+            t.status === 'aguardando_verificacao' || t.status === 'generating');
+
+        if (aguardando().length > 0 && !_stopRequested) {
+            const GRACA_MS = 300000; // 5 min varrendo os retardatarios
+            const inicio = Date.now();
+            console.log('[Dotti] Envio concluido. ' + aguardando().length +
+                ' video(s) ainda sem download — varrendo a grade por ate 5min ' +
+                '(sem reenviar nada).');
+
+            while (Date.now() - inicio < GRACA_MS && !_stopRequested) {
+                await scanForVideos();
+                if (aguardando().length === 0) {
+                    console.log('[Dotti] Todos os retardatarios foram baixados.');
+                    break;
+                }
+                await sleep(5000);
+            }
+        }
+
+        // O que sobrou nunca ficou pronto: conta como NAO GERADO, sem reenvio.
+        // Regenerar isso e decisao dela, e so depois de tudo enviado.
+        const naoGerados = _promptList.filter(t =>
+            t.status === 'aguardando_verificacao' || t.status === 'generating');
+        for (const task of naoGerados) {
+            const slotToFree = _slots.findIndex(s => s === task.uuid);
+            if (slotToFree !== -1) _slots[slotToFree] = null;
+            task.status = 'failed';
+            task.failType = 'NAO_GERADO';
+            task.error = 'Nao ficou pronto ate o fim do envio';
+            console.log('[Dotti] [' + formatPromptId(task) + '] NAO GERADO — sem reenvio automatico');
+            notifyPanel({ type: 'PROMPT_FAILED', data: { number: task.number, failType: 'NAO_GERADO', error: task.error } });
+        }
+        if (naoGerados.length) {
+            console.log('[Dotti] ' + naoGerados.length + ' prompt(s) marcado(s) como NAO GERADO. ' +
+                'Reenvio so sob autorizacao, agora que a lista inteira ja foi enviada.');
         }
 
         // Finalizar
@@ -3064,17 +3066,31 @@
     // Retorna ao final para que o proximo scan cubra do final para o inicio
     // ============================================
     function scrollToRevealMore() {
-        let scrollEl = null;
-        let maxRatio = 1;
-        document.querySelectorAll('div').forEach(el => {
-            if (el.clientHeight > 50 && el.scrollHeight > el.clientHeight * 1.3) {
-                const ratio = el.scrollHeight / el.clientHeight;
-                if (ratio > maxRatio) {
-                    maxRatio = ratio;
-                    scrollEl = el;
+        // v3.5.0: no DOM Angular o container rolavel da grade e
+        // <cdk-virtual-scroll-viewport> — um custom element, NAO um <div>.
+        // A busca antiga varria so 'div', nunca o encontrava, e a funcao saia
+        // sem rolar nada. Por isso videos que ficavam prontos depois de sair da
+        // janela virtual nunca eram vistos: a virtualizacao mantem so ~7 tiles
+        // no DOM, e a grade nunca era percorrida.
+        let scrollEl = document.querySelector('cdk-virtual-scroll-viewport');
+
+        if (!scrollEl || scrollEl.scrollHeight <= scrollEl.clientHeight) {
+            // Fallback generico — agora sobre '*', nao so 'div', pra nao
+            // repetir o mesmo erro com outro custom element no futuro.
+            let maxRatio = 1;
+            let melhor = null;
+            document.querySelectorAll('*').forEach(el => {
+                if (el.clientHeight > 50 && el.scrollHeight > el.clientHeight * 1.3) {
+                    const ratio = el.scrollHeight / el.clientHeight;
+                    if (ratio > maxRatio) {
+                        maxRatio = ratio;
+                        melhor = el;
+                    }
                 }
-            }
-        });
+            });
+            scrollEl = melhor;
+        }
+
         if (!scrollEl || scrollEl.scrollHeight <= scrollEl.clientHeight) return;
 
         // Scroll agressivo: avanca 2 paginas por scan para cobrir mais rapido
