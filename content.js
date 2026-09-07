@@ -3458,7 +3458,10 @@
         return achou / tt.length;
     }
 
-    const _SCORE_MINIMO = 0.6;
+    // Limite baixo de proposito: com o universo restrito aos prompts ja
+    // enviados (~7, nao 211), 0.50 contra 0.25 ja e decisao clara. O que
+    // protege contra chute e a folga sobre o segundo, nao um limite alto.
+    const _SCORE_MINIMO = 0.35;
 
     // v3.4.2: o aria-label do tile NAO e o prompt truncado — e um titulo curto
     // que o proprio Flow gera a partir do conteudo. Confirmado no log dela:
@@ -3467,34 +3470,71 @@
     // As palavras aparecem no MEIO do texto e nem contiguas, entao comparar
     // por prefixo (como fazia antes) nunca casava nada. Agora e sobreposicao
     // de palavras.
+    // Margem exigida sobre o segundo colocado. Sem folga, e chute.
+    const _FATOR_FOLGA = 2.0;
+    const _DELTA_FOLGA = 0.25;
+
+    // Candidatos = SO os prompts que a extensao realmente ja submeteu.
+    // Este e o furo que nomeou o video do prompt 1 como 075: o codigo comparava
+    // contra _promptList inteiro (211 prompts), e os de numero 75 e 197 — que
+    // nem tinham sido enviados ainda — venceram porque continham literalmente
+    // as palavras da parafrase que o Flow gerou como titulo.
+    function _promptsJaEnviados() {
+        return _promptList.filter(p =>
+            p.startedAt || p.status === 'generating' || p.status === 'complete');
+    }
+
+    // v3.4.3: decisao em tres niveis. Nomear errado e pior do que nao baixar,
+    // entao no caso duvidoso devolve null e o tile NAO e marcado — a proxima
+    // varredura tenta de novo.
     function _casarTileComPrompt(rotulo) {
         if (!rotulo || rotulo.trim().length <= 5) return null;
 
-        const notas = _promptList
-            .map(p => ({ p: p, s: _scoreTituloNoPrompt(rotulo, p.text || "") }))
-            .filter(n => n.s >= _SCORE_MINIMO);
+        const enviados = _promptsJaEnviados();
+        if (!enviados.length) return null;
 
-        if (!notas.length) {
-            // Loga o melhor score mesmo assim: se voltar a falhar, o proximo
-            // diagnostico ja vem com o numero em vez de so "nao casou".
-            let melhor = 0;
-            for (const p of _promptList) {
-                const s = _scoreTituloNoPrompt(rotulo, p.text || "");
-                if (s > melhor) melhor = s;
+        // Nivel 1: numero explicito no titulo. Exato, sem heuristica.
+        const porNumero = String(rotulo).match(/PROMPT\s*0*(\d+)/i);
+        if (porNumero) {
+            const alvo = enviados.find(p => p.number === Number(porNumero[1]));
+            if (alvo) {
+                console.log('[Dotti Scanner] Match por numero exato: #' + alvo.number);
+                return alvo;
             }
-            console.log('[Dotti Scanner] Sem match (melhor score ' +
-                melhor.toFixed(2) + ', minimo ' + _SCORE_MINIMO + '):',
-                rotulo.substring(0, 50));
+        }
+
+        // Nivel 2: sobreposicao de palavras, mas so vence com folga.
+        // O titulo do Flow e uma PARAFRASE do prompt ("dolly forward" virou
+        // "camera approaching"), entao score alto nao e garantido nem no
+        // acerto — o que separa acerto de chute e a distancia pro segundo.
+        const notas = enviados
+            .map(p => ({ p: p, s: _scoreTituloNoPrompt(rotulo, p.text || "") }))
+            .sort((a, b) => b.s - a.s);
+
+        const top = notas[0];
+        const seg = notas[1];
+
+        if (!top || top.s < _SCORE_MINIMO) {
+            console.log('[Dotti Scanner] INCERTO — score baixo (' +
+                (top ? top.s.toFixed(2) : '0.00') + ' < ' + _SCORE_MINIMO +
+                ') entre ' + enviados.length + ' enviados:', rotulo.substring(0, 45));
             return null;
         }
 
-        // Prefere quem ainda falta baixar; se todos ja completaram, usa todos
-        const pendentes = notas.filter(n =>
-            (n.p.foundVideos || 0) < (n.p.expectedVideos || 1));
-        const pool = pendentes.length ? pendentes : notas;
+        const temFolga = !seg || seg.s === 0 ||
+            top.s >= _FATOR_FOLGA * seg.s ||
+            (top.s - seg.s) >= _DELTA_FOLGA;
 
-        pool.sort((a, b) => b.s - a.s);
-        return pool[0].p;
+        if (!temFolga) {
+            console.log('[Dotti Scanner] INCERTO — ambiguo (#' + top.p.number + ' ' +
+                top.s.toFixed(2) + ' vs #' + seg.p.number + ' ' + seg.s.toFixed(2) +
+                '), nao vou chutar:', rotulo.substring(0, 45));
+            return null;
+        }
+
+        console.log('[Dotti Scanner] Match #' + top.p.number + ' (score ' +
+            top.s.toFixed(2) + (seg ? ' vs ' + seg.s.toFixed(2) : '') + ')');
+        return top.p;
     }
 
     async function _scanTilesParaDownload() {
