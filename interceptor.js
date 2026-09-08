@@ -89,6 +89,30 @@
     }
   }
 
+  // v3.9.0: o titulo curto que o Flow gera para a midia. O tile do grid usa
+  // exatamente esse texto no aria-label, entao ele e a CHAVE DE JUNCAO exata
+  // entre o DOM e o mediaId — nao e mais preciso adivinhar por sobreposicao
+  // de palavras (o titulo e uma parafrase do prompt, nunca casou direito).
+  function _dottiTitulo(m) {
+    var t = '';
+    try { t = m.mediaMetadata.mediaTitle || ''; } catch(e) {}
+    if (!t) try { t = m.mediaTitle || m.title || ''; } catch(e) {}
+    if (!t) try { t = m.mediaMetadata.title || ''; } catch(e) {}
+    if (!t) try { t = m.video.generatedVideo.title || ''; } catch(e) {}
+    return String(t || '').trim();
+  }
+
+  // Segunda chave exata: a URL da miniatura. O tile tem <img class="thumbnail">
+  // e, se a API devolver a mesma URL, o casamento e por igualdade de string.
+  function _dottiThumb(m) {
+    var u = '';
+    try { u = m.mediaMetadata.thumbnailUrl || ''; } catch(e) {}
+    if (!u) try { u = m.thumbnailUrl || m.fifeUrl || ''; } catch(e) {}
+    if (!u) try { u = m.video.thumbnailUrl || m.video.fifeUrl || ''; } catch(e) {}
+    if (!u) try { u = m.image.fifeUrl || ''; } catch(e) {}
+    return String(u || '').trim();
+  }
+
   function processVideoSubmitResponse(responseText) {
     try {
       var data = JSON.parse(responseText);
@@ -145,7 +169,8 @@
           }
         }
 
-        entries.push({ mediaId: mediaId, prompt: prompt, operationName: opName });
+        entries.push({ mediaId: mediaId, prompt: prompt, operationName: opName,
+                       title: _dottiTitulo(m), thumbUrl: _dottiThumb(m) });
         _DOTTI_DEBUG && console.log('[DottiInterceptor] VideoSubmit mediaId:', mediaId, 'prompt:', prompt.substring(0, 50));
       }
 
@@ -162,7 +187,8 @@
         try { if (data.mediaMetadata?.mediaStatus?.mediaGenerationStatus === 'MEDIA_GENERATION_STATUS_PENDING') isVideo = true; } catch(e) {}
 
         if (isVideo) {
-          entries.push({ mediaId: data.name, prompt: rootPrompt, operationName: '' });
+          entries.push({ mediaId: data.name, prompt: rootPrompt, operationName: '',
+                         title: _dottiTitulo(data), thumbUrl: _dottiThumb(data) });
           _DOTTI_DEBUG && console.log('[DottiInterceptor] VideoSubmit (root) mediaId:', data.name);
         }
       }
@@ -202,11 +228,13 @@
         if (status === 'MEDIA_GENERATION_STATUS_SUCCESSFUL' || status === 'COMPLETED' || status === 'SUCCESSFUL') {
           var prompt = '';
           try { prompt = m.mediaMetadata.requestData.promptInputs[0].structuredPrompt.parts[0].text || ''; } catch(e) {}
-          updates.push({ mediaId: mediaId, status: 'COMPLETED', prompt: prompt });
+          updates.push({ mediaId: mediaId, status: 'COMPLETED', prompt: prompt,
+                         title: _dottiTitulo(m), thumbUrl: _dottiThumb(m) });
         } else if (status === 'MEDIA_GENERATION_STATUS_FAILED' || status === 'FAILED') {
           var prompt2 = '';
           try { prompt2 = m.mediaMetadata.requestData.promptInputs[0].structuredPrompt.parts[0].text || ''; } catch(e) {}
-          updates.push({ mediaId: mediaId, status: 'FAILED', prompt: prompt2 });
+          updates.push({ mediaId: mediaId, status: 'FAILED', prompt: prompt2,
+                         title: _dottiTitulo(m), thumbUrl: _dottiThumb(m) });
         }
       }
 
@@ -308,8 +336,29 @@
       // v3.8.0: quando a pagina busca a midia PELO ID (ao montar o blob do
       // download), a URL carrega ?name=<mediaId>. E a identidade exata do
       // video que esta prestes a ser baixado.
-      mediaFetch: url.indexOf('getMediaUrl') !== -1 && url.indexOf('name=') !== -1
+      // v3.9.0: alargado. Antes exigia 'getMediaUrl' e o evento NUNCA disparou
+      // (zero linhas 'media-fetch' no log dela) — a pagina monta o blob por
+      // outra rota. Agora emite para qualquer URL que carregue um id de midia;
+      // quem filtra e o content.js, contra o _mediaTracker.
+      mediaFetch: _DOTTI_RE_ID.test(url)
     };
+  }
+
+  // Qualquer parametro que carregue um id de midia. Deliberadamente amplo:
+  // e o content.js que decide se o id e conhecido.
+  var _DOTTI_RE_ID = /[?&](?:name|mediaKey|mediaId|id)=[A-Za-z0-9_.:-]{8,}/;
+
+  // Janela de diagnostico: enquanto ativa, loga as URLs vistas. O content.js
+  // liga isso em volta do clique de download, para o proximo log dizer de vez
+  // qual e a rota que monta o blob (em vez de eu chutar de novo).
+  var _dottiLogAte = 0;
+  document.addEventListener('dotti-log-urls', function (e) {
+    var ms = (e && e.detail && e.detail.ms) || 8000;
+    _dottiLogAte = Date.now() + ms;
+  });
+  function _dottiTalvezLogar(url) {
+    if (Date.now() > _dottiLogAte) return;
+    console.log('[DottiInterceptor][URL]', String(url || '').substring(0, 160));
   }
 
   // v3.8.0: emite o mediaId da midia que a pagina esta buscando. Disparado
@@ -317,7 +366,7 @@
   // desse fetch, entao o content.js tem tempo de registrar o nome exato.
   function _dottiEmitMediaFetch(url) {
     try {
-      var m = String(url || '').match(/[?&]name=([^&]+)/);
+      var m = String(url || '').match(/[?&](?:name|mediaKey|mediaId|id)=([^&]+)/);
       if (!m) return;
       var mediaId = decodeURIComponent(m[1]);
       document.dispatchEvent(new CustomEvent('dotti-media-fetch', {
@@ -334,6 +383,7 @@
   XMLHttpRequest.prototype.send = function(body) {
     var url = this._dottiUrl || '';
     var checks = shouldIntercept(url);
+    _dottiTalvezLogar(url);
     if (checks.mediaFetch) _dottiEmitMediaFetch(url);
     if (checks.uploadUserImage) this.addEventListener('load', function() { processUploadResponse(this.responseText); });
     if (checks.uploadImage) this.addEventListener('load', function() {
@@ -376,6 +426,7 @@
     var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url || '');
     var p = origFetch.apply(this, arguments);
     var checks = shouldIntercept(url);
+    _dottiTalvezLogar(url);
     if (checks.mediaFetch) _dottiEmitMediaFetch(url);
     if (checks.uploadUserImage) p.then(function(r) { r.clone().text().then(processUploadResponse).catch(function(){}); }).catch(function(){});
     if (checks.uploadImage) p.then(function(r) {
@@ -410,5 +461,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v3.0.0 ativo');
+  console.log('[DottiInterceptor] v3.9.0 ativo');
 })();

@@ -1964,7 +1964,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // avisa ANTES de clicar e o listener renomeia o que o Flow
                 // disparar. Reusa a mesma fila do Estender.
                 case "EXPECT_DOWNLOAD": {
-                    const { filename, folder, placeholder } = message;
+                    const { filename, folder, placeholder, promptNumber, mediaId } = message;
                     // v3.8.0: placeholder = "vou clicar, mas o nome vem do
                     // interceptor". Se nenhum mediaId chegar, o listener cancela
                     // SEM re-baixar — nunca cria arquivo com nome chutado.
@@ -1976,7 +1976,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
                     if (!filename) { sendResponse({ success: false, error: "no_filename" }); break; }
                     const full = folder ? folder + "/" + filename : filename;
-                    _installExtendDownloadListener({ fullName: full, folder: folder || "" });
+                    _installExtendDownloadListener({
+                        fullName: full, folder: folder || "",
+                        promptNumber: promptNumber || null, mediaId: mediaId || null
+                    });
                     console.log("[Dotti] Download esperado:", full);
                     sendResponse({ success: true });
                     break;
@@ -2574,7 +2577,13 @@ let _nomeExatoPendente = null; // { fullName, promptNumber, mediaId, at }
 
 function _installExtendDownloadListener(pending) {
     _extendDownloadQueue.push(pending);
-    console.log('[Extend] download enfileirado: SCENE', pending.sceneNumber,
+    // v3.9.0: o rotulo '[Extend]' e so porque o listener e compartilhado; a
+    // aba Video usa a mesma fila. Antes isso imprimia "SCENE undefined" para
+    // todo download de video, o que confundia a leitura do log.
+    const _oQue = pending.sceneNumber ? ('cena ' + pending.sceneNumber)
+        : (pending.fullName ? pending.fullName
+            : (pending.placeholder ? 'placeholder (nome vem depois)' : 'sem nome'));
+    console.log('[Download] enfileirado:', _oQue,
         '(fila agora=' + _extendDownloadQueue.length + ')');
     _resetExtendDownloadTimeout();
     if (_extendDownloadListener) return; // ja instalado, fila ja atende
@@ -2615,8 +2624,8 @@ function _installExtendDownloadListener(pending) {
                     if (targetTabId) await chrome.tabs.sendMessage(targetTabId, {
                         action: 'DOWNLOAD_RESULTADO',
                         ok: !!ok,
-                        promptNumber: exato ? exato.promptNumber : (next.promptNumber || null),
-                        mediaId: exato ? exato.mediaId : (next.mediaId || null),
+                        promptNumber: next.promptNumber || (exato ? exato.promptNumber : null),
+                        mediaId: next.mediaId || (exato ? exato.mediaId : null),
                         filename: nomeFinal || null
                     });
                 } catch (e) { }
@@ -2662,16 +2671,21 @@ function _installExtendDownloadListener(pending) {
             // v3.4.0: a aba Video enfileira com fullName ja pronto (o nome sai
             // do prompt correspondente). O Estender continua sem fullName e
             // mantem o padrao SCENE_NNN_Xs.
-            // Ordem de preferencia: mediaId (exato) > fullName enfileirado
-            // (casamento por texto) > padrao SCENE do Estender.
-            const base = (exato && exato.fullName) || nomePorMedia || next.fullName;
+            // v3.9.0: ordem de preferencia invertida quando a entrada JA vem
+            // com nome. A partir da v3.9.0 a aba Video so clica depois de
+            // resolver a identidade (titulo da API == aria-label do tile),
+            // entao next.fullName e o nome certo daquele clique. O nome por
+            // mediaId/redirect e oportunista e pode estar velho de outro tile,
+            // entao so vale quando a entrada e placeholder (sem nome).
+            const base = next.fullName ||
+                (exato && exato.fullName) || nomePorMedia;
             const newName = base
                 ? (base.replace(/\.[a-z0-9]+$/i, "") + "." + ext)
                 : ((next.folder || 'LetzScenes') + '/' +
                     'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
                     '_' + next.totalSeconds + 's.' + ext);
 
-            console.log('[Extend] cancelando download nativo id=' + item.id +
+            console.log('[Download] cancelando download nativo id=' + item.id +
                 ' url=' + url.substring(0, 80));
             try {
                 await new Promise((resolve) => chrome.downloads.cancel(item.id, () => resolve()));

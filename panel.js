@@ -267,6 +267,16 @@ function setupMessageListener() {
                 handleVideoGenerated(data);
                 break;
 
+            // v3.9.0: resumo do fim da execucao. Sem um case aqui a mensagem
+            // era descartada em silencio (foi o que aconteceu com o
+            // 'aguardando_verificacao' da v3.5.0).
+            case "RUN_SUMMARY":
+                console.log("[Panel] RESUMO — gerados sem download:",
+                    (data.geradosSemDownload || []).join(", ") || "(nenhum)");
+                console.log("[Panel] RESUMO — nao gerados:",
+                    (data.naoGerados || []).join(", ") || "(nenhum)");
+                break;
+
             // v3.0.0: Content.js baixou video direto (estilo DarkPlanner)
             case "VIDEO_DOWNLOADED":
                 handleVideoDownloaded(data);
