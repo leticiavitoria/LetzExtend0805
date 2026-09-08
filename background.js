@@ -21,6 +21,68 @@ const CONFIG = {
 const FLOW_URL = "https://flow.google.com/";
 const FLOW_HOSTS = ["flow.google.com", "labs.google"];
 
+// ============================================
+// v3.6.0 — URL REAL DO VIDEO VIA REDIRECT
+// ============================================
+// O tile do Flow nunca expoe o MP4: so expoe
+// .../media.getMediaUrlRedirect?name=<mediaId>, que redireciona para o
+// arquivo em flow-content.google. Observando o redirect nos ganhamos as
+// DUAS coisas que faltavam:
+//
+//   1) a URL real do MP4, que devolve o download direto por
+//      chrome.downloads.download({url, filename}) — controle total do nome,
+//      um passo so, sem navegar menu;
+//   2) o mediaId (?name=), que identifica EXATAMENTE de qual midia se trata.
+//
+// O content.js ja mantem _mediaTracker: mediaId -> numero do prompt, montado
+// no envio a partir do texto que NOS mandamos (nao da parafrase que o Flow
+// poe no titulo do tile). Juntando os dois, "de qual prompt e este video?"
+// deixa de ser adivinhacao.
+//
+// MV3: so o webRequest BLOQUEANTE foi removido; observar onBeforeRedirect
+// continua disponivel.
+const _mediaUrlPorId = new Map();   // mediaId -> { url, at }
+let _ultimoRedirect = null;         // { mediaId, at } — o mais recente
+const _TTL_MEDIA_URL = 30 * 60 * 1000;
+
+function _extrairMediaId(url) {
+    const m = String(url || '').match(/[?&]name=([^&]+)/i);
+    return m ? decodeURIComponent(m[1]) : null;
+}
+
+function _guardarMediaUrl(mediaId, url) {
+    if (!mediaId || !url) return;
+    _mediaUrlPorId.set(mediaId, { url: url, at: Date.now() });
+    // Poda por TTL para o mapa nao crescer sem limite numa fila de 200+
+    const limite = Date.now() - _TTL_MEDIA_URL;
+    for (const [k, v] of _mediaUrlPorId) {
+        if (v.at < limite) _mediaUrlPorId.delete(k);
+    }
+}
+
+try {
+    chrome.webRequest.onBeforeRedirect.addListener(
+        (det) => {
+            try {
+                const mediaId = _extrairMediaId(det.url);
+                if (!mediaId || !det.redirectUrl) return;
+                _guardarMediaUrl(mediaId, det.redirectUrl);
+                // Guarda tambem o ULTIMO redirect: quando o Flow dispara o
+                // download logo em seguida, e este o mediaId em questao. E o
+                // que permite nomear o arquivo pelo mediaId em vez de tentar
+                // adivinhar de qual prompt o tile era ANTES de clicar.
+                _ultimoRedirect = { mediaId: mediaId, at: Date.now() };
+                console.log('[Dotti] URL real capturada:', mediaId.substring(0, 12),
+                    '->', String(det.redirectUrl).substring(0, 70));
+            } catch (e) { }
+        },
+        { urls: ['*://*.google.com/*getMediaUrlRedirect*', '*://labs.google/*getMediaUrlRedirect*'] }
+    );
+    console.log('[Dotti] Observador de redirect de midia instalado');
+} catch (e) {
+    console.error('[Dotti] webRequest indisponivel:', e.message);
+}
+
 function isFlowUrl(url) {
     if (!url) return false;
     return FLOW_HOSTS.some(h => url.includes(h));
@@ -2444,11 +2506,34 @@ function _installExtendDownloadListener(pending) {
 
             const next = _extendDownloadQueue.shift();
             const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
+
+            // v3.6.0: se um redirect de midia acabou de passar, ele diz QUAL
+            // midia e esta. Perguntar ao content.js o nome por mediaId e exato;
+            // o fullName enfileirado veio de casamento por texto, que ja errou
+            // varias vezes (o titulo do tile e uma parafrase do prompt).
+            let nomePorMedia = null;
+            try {
+                if (_ultimoRedirect && (Date.now() - _ultimoRedirect.at) < 60000 && targetTabId) {
+                    const r = await chrome.tabs.sendMessage(targetTabId, {
+                        action: 'RESOLVE_MEDIA_NAME',
+                        mediaId: _ultimoRedirect.mediaId
+                    });
+                    if (r && r.success && r.filename) {
+                        nomePorMedia = (r.folder ? r.folder + '/' : '') + r.filename;
+                        console.log('[Dotti] Nome resolvido por mediaId:', nomePorMedia);
+                    }
+                }
+            } catch (e) {
+                console.log('[Dotti] Nao consegui resolver por mediaId:', e.message);
+            }
             // v3.4.0: a aba Video enfileira com fullName ja pronto (o nome sai
             // do prompt correspondente). O Estender continua sem fullName e
             // mantem o padrao SCENE_NNN_Xs.
-            const newName = next.fullName
-                ? (next.fullName.replace(/\.[a-z0-9]+$/i, "") + "." + ext)
+            // Ordem de preferencia: mediaId (exato) > fullName enfileirado
+            // (casamento por texto) > padrao SCENE do Estender.
+            const base = nomePorMedia || next.fullName;
+            const newName = base
+                ? (base.replace(/\.[a-z0-9]+$/i, "") + "." + ext)
                 : ((next.folder || 'LetzScenes') + '/' +
                     'SCENE_' + String(next.sceneNumber).padStart(3, '0') +
                     '_' + next.totalSeconds + 's.' + ext);
