@@ -1622,6 +1622,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                 case "PAUSE_QUEUE":
                     await pauseQueue();
+                    // v3.9.4: pauseQueue() so mexe na fila ANTIGA do background.
+                    // O envio de verdade roda no content.js, que so para com
+                    // STOP_AUTOMATION — era por isso que o botao Parar nao
+                    // parava: o loop seguia enviando ate o fim da lista.
+                    if (targetTabId) {
+                        try {
+                            await chrome.tabs.sendMessage(targetTabId, { action: 'STOP_AUTOMATION' });
+                            console.log('[Dotti] PAUSE_QUEUE -> STOP_AUTOMATION enviado ao content');
+                        } catch (e) {
+                            console.warn('[Dotti] PAUSE_QUEUE: content nao respondeu:', e.message);
+                        }
+                    }
                     sendResponse({ success: true });
                     break;
 
