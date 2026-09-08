@@ -43,6 +43,31 @@ const FLOW_HOSTS = ["flow.google.com", "labs.google"];
 // continua disponivel.
 const _mediaUrlPorId = new Map();   // mediaId -> { url, at }
 let _ultimoRedirect = null;         // { mediaId, at } — o mais recente
+
+// v3.7.0: template da URL de midia, APRENDIDO do trafego real.
+// Nao chutar o caminho: o Flow mudou de dominio uma vez nesta migracao e pode
+// mudar de rota tambem. A primeira requisicao real de midia que passar ensina
+// o template; so caimos no padrao se nenhuma tiver passado ainda, e nesse caso
+// o log diz isso em voz alta.
+let _templateMediaUrl = null;       // ex.: "https://flow.google.com/fx/api/trpc/media.getMediaUrlRedirect?name="
+const _TEMPLATE_PADRAO = "https://flow.google.com/fx/api/trpc/media.getMediaUrlRedirect?name=";
+
+function _aprenderTemplate(url) {
+    try {
+        const i = String(url).indexOf('name=');
+        if (i > 0 && !_templateMediaUrl) {
+            _templateMediaUrl = String(url).substring(0, i + 5);
+            console.log('[Dotti] Template de midia aprendido:', _templateMediaUrl);
+        }
+    } catch (e) { }
+}
+
+function _urlDaMidia(mediaId) {
+    if (_templateMediaUrl) return _templateMediaUrl + encodeURIComponent(mediaId);
+    console.warn('[Dotti] Nenhuma requisicao de midia observada ainda — usando template padrao. ' +
+        'Se o download falhar, e aqui que provavelmente esta o problema.');
+    return _TEMPLATE_PADRAO + encodeURIComponent(mediaId);
+}
 const _TTL_MEDIA_URL = 30 * 60 * 1000;
 
 function _extrairMediaId(url) {
@@ -65,6 +90,7 @@ try {
         (det) => {
             try {
                 const mediaId = _extrairMediaId(det.url);
+                _aprenderTemplate(det.url);
                 if (!mediaId || !det.redirectUrl) return;
                 _guardarMediaUrl(mediaId, det.redirectUrl);
                 // Guarda tambem o ULTIMO redirect: quando o Flow dispara o
@@ -1944,6 +1970,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     _installExtendDownloadListener({ fullName: full, folder: folder || "" });
                     console.log("[Dotti] Download esperado:", full);
                     sendResponse({ success: true });
+                    break;
+                }
+
+                // v3.7.0: baixa SEM DOM. A API ja disse COMPLETED e ja
+                // sabemos o mediaId e o prompt; monta a URL do
+                // getMediaUrlRedirect, segue o redirect e baixa direto.
+                // Nao depende da grade mostrar o tile, nem de rolagem, nem de
+                // virtualizacao, nem de casar texto.
+                case "DOWNLOAD_BY_MEDIA_ID": {
+                    const { mediaId, filename, folder } = message;
+                    if (!mediaId || !filename) {
+                        sendResponse({ success: false, error: "faltam mediaId/filename" });
+                        break;
+                    }
+                    const destino = folder ? folder + "/" + filename : filename;
+                    try {
+                        // Se ja vimos o redirect desta midia, usa direto;
+                        // senao resolve agora.
+                        const cache = _mediaUrlPorId.get(mediaId);
+                        let urlFinal = cache && cache.url;
+                        if (!urlFinal) {
+                            urlFinal = await _resolveDownloadRedirect(_urlDaMidia(mediaId));
+                        }
+                        if (!urlFinal) {
+                            sendResponse({ success: false, error: "sem url" });
+                            break;
+                        }
+
+                        const id = await chrome.downloads.download({
+                            url: urlFinal,
+                            filename: destino,
+                            conflictAction: "uniquify",
+                            saveAs: false
+                        });
+                        // Marca como nosso para o listener de rename nao
+                        // interceptar e renomear de novo o que ja veio certo.
+                        if (id) _extendOurDownloadIds.add(id);
+                        console.log("[Dotti] Baixado por mediaId:", destino, "(id=" + id + ")");
+                        sendResponse({ success: true, downloadId: id });
+                    } catch (e) {
+                        console.error("[Dotti] Falha ao baixar por mediaId:", e.message);
+                        sendResponse({ success: false, error: e.message });
+                    }
                     break;
                 }
 
