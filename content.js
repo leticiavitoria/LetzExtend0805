@@ -1169,47 +1169,83 @@
     const _uuidsVistos = new Set();
     const _JANELA_UUID_MS = 60000;
 
-    function _registrarUuidsDoEnvio(uuids) {
-        // So os que nunca vimos: os antigos sao das midias ja existentes.
-        const novos = (uuids || []).filter(u => !_uuidsVistos.has(u));
-        for (const u of (uuids || [])) _uuidsVistos.add(u);
-        if (!novos.length) return;
+    // Lotes ambiguos ficam guardados aqui ate darem para resolver.
+    // v3.9.4: antes o lote com 2 uuid novos era DESCARTADO, e os prompts 44,
+    // 50, 63, 64 e 65 do teste dela ficaram sem identidade por causa disso. Pior:
+    // o "uuid solto" que chegava logo depois era amarrado ao mesmo prompt, e ele
+    // podia ser de outro video — batizaria o arquivo errado.
+    const _poolAmbiguo = [];   // [{ uuids:[...], promptNumber, at }]
 
-        const n = _lastSubmittedPromptNumber;
-        if (!n) return;
-        if (Date.now() - (_lastSubmittedTime || 0) > _JANELA_UUID_MS) return;
-        if (_promptComUuid.has(n)) return;   // este prompt ja tem o seu
-
-        // Regra estrita: com mais de um uuid novo nao da para saber qual e o
-        // do prompt recem-enviado. Nomear errado e pior do que nao baixar,
-        // entao neste caso simplesmente nao amarra.
-        if (novos.length !== 1) {
-            console.log('[Dotti] uuid do envio: ' + novos.length +
-                ' novos ao mesmo tempo — ambiguo, nao vou amarrar (#' + n + ')');
-            return;
-        }
-
-        _uuidParaPrompt.set(novos[0], n);
-        _promptComUuid.set(n, novos[0]);
-        console.log('[Dotti] uuid do envio: #' + n + ' -> ' + novos[0].substring(0, 12));
+    function _amarrar(uuid, promptNumber, via) {
+        if (_uuidParaPrompt.has(uuid)) return false;
+        if (_promptComUuid.has(promptNumber)) return false;
+        _uuidParaPrompt.set(uuid, promptNumber);
+        _promptComUuid.set(promptNumber, uuid);
+        console.log('[Dotti] uuid do envio: #' + promptNumber + ' -> ' +
+            uuid.substring(0, 12) + (via ? ' (' + via + ')' : ''));
+        return true;
     }
 
-    // v3.9.2: rotulo do tile -> numero do prompt, aprendido pelo mediaId da URL
-    // do download. Identidade exata, sobrevive as passadas seguintes.
-    const _rotuloParaPrompt = new Map();
-
-    // A chave do _mediaTracker vem da resposta do envio e pode chegar como
-    // "<uuid>" ou como "media/<uuid>" / "operations/<uuid>". Casa exato e,
-    // falhando, por sufixo — sem inventar: ou o id bate, ou nao.
-    function _acharNoTracker(mediaId) {
-        const direto = _mediaTracker.get(mediaId);
-        if (direto) return direto;
-        const id = String(mediaId);
-        for (const [k, v] of _mediaTracker.entries()) {
-            const ks = String(k);
-            if (ks.endsWith('/' + id) || id.endsWith('/' + ks)) return v;
+    // Um lote ambiguo vira certeza quando todos os seus uuid, menos um, ja
+    // pertencem a outros prompts. Repete enquanto houver progresso, porque
+    // resolver um lote pode destravar o seguinte.
+    function _resolverPoolPorEliminacao() {
+        let mudou = true;
+        while (mudou) {
+            mudou = false;
+            for (let i = _poolAmbiguo.length - 1; i >= 0; i--) {
+                const item = _poolAmbiguo[i];
+                if (_promptComUuid.has(item.promptNumber)) { _poolAmbiguo.splice(i, 1); continue; }
+                const restantes = item.uuids.filter(u => !_uuidParaPrompt.has(u));
+                if (restantes.length === 0) { _poolAmbiguo.splice(i, 1); continue; }
+                if (restantes.length === 1) {
+                    if (_amarrar(restantes[0], item.promptNumber, 'por eliminacao')) mudou = true;
+                    _poolAmbiguo.splice(i, 1);
+                }
+            }
         }
-        return null;
+    }
+
+    function _registrarUuidsDoEnvio(uuids) {
+        const lista = uuids || [];
+        // Candidato = uuid que nunca vimos (as midias antigas ja foram vistas)
+        // OU um que ficou pendurado num lote ambiguo e ainda nao pertence a
+        // ninguem. Sem esse segundo caso ha empate mortal: o uuid do prompt
+        // seguinte ja tinha aparecido no lote ambiguo do anterior, entao nunca
+        // era "novo", nunca amarrava, e a eliminacao nunca destravava.
+        const pendenteNoPool = (u) => _poolAmbiguo.some(x => x.uuids.indexOf(u) !== -1);
+        const novos = lista.filter(u =>
+            !_uuidParaPrompt.has(u) && (!_uuidsVistos.has(u) || pendenteNoPool(u)));
+        for (const u of lista) _uuidsVistos.add(u);
+
+        const n = _lastSubmittedPromptNumber;
+        const naJanela = n && (Date.now() - (_lastSubmittedTime || 0) <= _JANELA_UUID_MS);
+
+        if (novos.length && naJanela && !_promptComUuid.has(n)) {
+            const temPoolAberto = _poolAmbiguo.some(x => x.promptNumber === n);
+
+            if (novos.length === 1 && !temPoolAberto) {
+                _amarrar(novos[0], n);
+            } else if (novos.length > 1) {
+                _poolAmbiguo.push({ uuids: novos.slice(), promptNumber: n, at: Date.now() });
+                console.log('[Dotti] uuid do envio: ' + novos.length +
+                    ' novos ao mesmo tempo (#' + n + ') — guardado para resolver por eliminacao');
+            } else {
+                // Um uuid solto DEPOIS de um lote ambiguo do mesmo prompt e
+                // quase sempre de OUTRO video (o do prompt seguinte). Amarrar
+                // no chute foi o que quase batizou o arquivo errado. E colocar
+                // no pool tambem nao serve: sujaria o conjunto e travaria a
+                // eliminacao. Entao apenas ignoramos.
+                //
+                // Se o certo for este uuid, o pool acaba esvaziando (os outros
+                // sao amarrados a seus donos) e o prompt fica sem amarracao —
+                // sem arquivo, mas nunca com nome errado, que e a regra dela.
+                console.log('[Dotti] uuid solto apos lote ambiguo (#' + n +
+                    ') — ignorado para nao arriscar nome errado');
+            }
+        }
+
+        _resolverPoolPorEliminacao();
     }
 
     function setupApiInterceptorListeners() {
@@ -2258,6 +2294,7 @@
         _uuidParaPrompt.clear();
         _promptComUuid.clear();
         _uuidsVistos.clear();
+        _poolAmbiguo.length = 0;
         _falhasSeguidas = 0;
         _downloadSuspenso = false;
         _gradeScrollEl = null;
@@ -2329,9 +2366,57 @@
     // ============================================
 
     function getRandomWaitTime() {
-        // Delay aleatorio entre envios: 3-6s base + extra se high demand recente
-        const base = 3000 + Math.random() * 3000;
+        // v3.9.4: o "Delay entre prompts" do painel manda aqui. Antes era fixo
+        // em 3-6s e a configuracao dela era simplesmente ignorada.
+        const cfg = Number(_currentQueueSettings && _currentQueueSettings.promptDelay);
+        const base = (cfg > 0)
+            ? (cfg * 1000 + Math.random() * 1000)   // jitter de 1s, para nao virar metronomo
+            : (3000 + Math.random() * 3000);
         return _recentHighDemandError ? Math.max(15000, base) : base;
+    }
+
+    // ============================================
+    // v3.9.4 — LOTES: "Prompts por lote" e "Intervalo entre lotes"
+    // ============================================
+    // Esses campos do painel so existiam na fila ANTIGA do background
+    // (background.js:1280). O motor de verdade e este aqui, e ele lia apenas
+    // maxSimultaneous — ou seja, nunca houve pausa entre lotes. Ela configura
+    // 50 por lote e os problemas comecavam logo depois do prompt 50.
+    let _enviadosNoLote = 0;
+
+    function _tamanhoDoLote() {
+        const n = Number(_currentQueueSettings && _currentQueueSettings.batchSize);
+        return n > 0 ? n : 0;   // 0 = sem lote (comportamento antigo)
+    }
+
+    function _intervaloDoLote() {
+        const n = Number(_currentQueueSettings && _currentQueueSettings.batchInterval);
+        return n > 0 ? n * 1000 : 0;
+    }
+
+    // Pausa interrompivel: checa o stop a cada segundo e avisa o painel.
+    async function _pausarEntreLotesSePreciso() {
+        const tam = _tamanhoDoLote();
+        const intervalo = _intervaloDoLote();
+        if (!tam || !intervalo) return;
+        if (_enviadosNoLote < tam) return;
+
+        _enviadosNoLote = 0;
+        console.log('[Dotti] Lote de ' + tam + ' enviado — pausando ' +
+            (intervalo / 1000) + 's antes do proximo lote.');
+
+        const fim = Date.now() + intervalo;
+        while (Date.now() < fim) {
+            if (_stopRequested || !_isRunning) {
+                console.log('[Dotti] Pausa de lote interrompida — parada pedida.');
+                return;
+            }
+            const restam = Math.ceil((fim - Date.now()) / 1000);
+            notifyPanel({ type: 'BATCH_PAUSE', data: { secondsLeft: restam, batchSize: tam } });
+            await sleep(1000);
+        }
+        notifyPanel({ type: 'BATCH_PAUSE', data: { secondsLeft: 0, batchSize: tam } });
+        console.log('[Dotti] Pausa concluida — retomando o envio.');
     }
 
     function formatPromptId(task) {
@@ -2768,6 +2853,7 @@
         _slots = new Array(_maxSimultaneous).fill(null);
         _activeSlots = 0;
         _consecutiveErrorCount = 0;
+        _enviadosNoLote = 0;
 
         console.log('[Dotti] processAllPromptsWithSlots: ' + _promptList.length + ' prompts, ' + _maxSimultaneous + ' slots');
 
@@ -2784,9 +2870,11 @@
 
             await submitTask(i);
             initialSent++;
+            _enviadosNoLote++;
+            await _pausarEntreLotesSePreciso();
 
             // Delay entre submissoes
-            if (initialSent < _maxSimultaneous) {
+            if (initialSent < _maxSimultaneous && !_stopRequested) {
                 const waitTime = getRandomWaitTime();
                 await sleep(waitTime);
             }
@@ -2898,6 +2986,9 @@
                     }
 
                     await submitTask(taskIndex);
+                    _enviadosNoLote++;
+                    await _pausarEntreLotesSePreciso();
+                    if (_stopRequested || !_isRunning) break;
 
                     // Delay antes de enviar proximo (ligeiramente maior para retry)
                     const waitTime = isRetry ? Math.max(5000, getRandomWaitTime()) : getRandomWaitTime();
@@ -3365,6 +3456,7 @@
     // o proximo. E nunca sai calada.
     let _gradeScrollEl = null;
     let _avisouSemScroller = false;
+    let _semScrollerSeguidas = 0;
 
     // Todos os candidatos a container rolavel, do mais provavel ao ultimo
     // recurso. document.scrollingElement entra na lista porque, se quem rola e
@@ -3389,15 +3481,34 @@
         document.querySelectorAll('cdk-virtual-scroll-viewport').forEach(el => {
             if (rolavel(el)) resto.push(el);
         });
-        // Sem tiles na tela, exigir altura de gente grande: e o que descarta
-        // overlays e paineis pequenos.
+        // v3.9.4: a altura minima voltou para 200px. Eu tinha subido para 600 e
+        // isso virou o erro "NENHUM container rolavel respondeu — candidatos
+        // testados: 1": no comeco do run a grade ainda e curta e nao sobrava
+        // candidato nenhum. Quem descarta o overlay e a preferencia por CONTER
+        // TILES, logo acima — nao a altura.
         document.querySelectorAll('*').forEach(el => {
-            if (el.clientHeight > 600 && rolavel(el)) resto.push(el);
+            if (el.clientHeight > 200 && rolavel(el)) resto.push(el);
         });
         if (document.scrollingElement) resto.push(document.scrollingElement);
 
         const out = comTiles.concat(resto);
         return out.filter((el, i) => out.indexOf(el) === i);
+    }
+
+    // v3.9.4: o container em uso ainda e o da grade? Com a altura minima de
+    // volta em 200px o overlay pequeno volta a ser candidato, e ele pode ser
+    // eleito no comeco do run, quando ainda nao ha tile nenhum. Sem esta
+    // checagem o cache o manteria para sempre — foi assim que a tela "rolava
+    // sem passar por cima dos videos".
+    function _aindaEhAGrade(el) {
+        const tiles = document.querySelectorAll('flow-grid-tile-container');
+        if (!tiles.length) return true;              // sem tiles, nada a comparar
+        for (const t of tiles) {
+            for (let p = t.parentElement; p; p = p.parentElement) {
+                if (p === el) return true;
+            }
+        }
+        return false;
     }
 
     function _descreverEl(el) {
@@ -3445,7 +3556,14 @@
             return true;
         };
 
-        if (_gradeScrollEl && document.contains(_gradeScrollEl) && tentar(_gradeScrollEl)) return;
+        if (_gradeScrollEl && document.contains(_gradeScrollEl) &&
+            _aindaEhAGrade(_gradeScrollEl) && tentar(_gradeScrollEl)) {
+            _semScrollerSeguidas = 0;
+            return;
+        }
+        if (_gradeScrollEl && !_aindaEhAGrade(_gradeScrollEl)) {
+            console.log('[Dotti Scroll] o container em uso nao contem os tiles — reprocurando');
+        }
 
         // O cache falhou (ou nao existe): procurar de novo.
         _gradeScrollEl = null;
@@ -3454,6 +3572,7 @@
             if (tentar(el)) {
                 _gradeScrollEl = el;
                 _avisouSemScroller = false;
+                _semScrollerSeguidas = 0;
                 console.log('[Dotti Scroll] grade = ' + _descreverEl(el) +
                     ' altura=' + el.scrollHeight + ' visivel=' + el.clientHeight);
                 return;
@@ -3461,11 +3580,14 @@
         }
 
         // Nunca sair calado: foi o silencio que escondeu essa falha ate agora.
-        if (!_avisouSemScroller) {
+        // Mas tambem nao gritar na primeira passada — no inicio do run a grade
+        // ainda esta vazia e nao ha o que rolar.
+        _semScrollerSeguidas++;
+        if (_semScrollerSeguidas >= 3 && !_avisouSemScroller) {
             _avisouSemScroller = true;
-            console.warn('[Dotti Scroll] NENHUM container rolavel respondeu — ' +
-                'a grade nao vai ser percorrida sozinha. Candidatos testados: ' +
-                _candidatosDeScroll().length);
+            console.warn('[Dotti Scroll] NENHUM container rolavel respondeu em ' +
+                _semScrollerSeguidas + ' varreduras — a grade nao vai ser ' +
+                'percorrida sozinha. Candidatos testados: ' + _candidatosDeScroll().length);
         }
     }
 
@@ -5757,7 +5879,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.9.3 ready (uuid amarrado no envio; disjuntor que nao trava)");
+        console.log("[Lets Automate] v3.9.4 ready (lotes e parada pelo painel; uuid por eliminacao)");
     }
 
     if (document.readyState === "loading") {

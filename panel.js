@@ -263,6 +263,19 @@ function setupMessageListener() {
             // ocorrido. Sem esta mensagem o unico sinal de "gerado" que chegava
             // era o proprio VIDEO_DOWNLOADED, e por isso GERADOS ficava sempre
             // igual a BAIXADOS.
+            // v3.9.4: pausa entre lotes vinda do content.js. Sem isto a
+            // ferramenta ficava parada e ela nao sabia por que.
+            case "BATCH_PAUSE": {
+                const seg = data.secondsLeft || 0;
+                if (seg > 0) {
+                    updateStatus("warning", "Lote de " + data.batchSize +
+                        " enviado — proximo lote em " + seg + "s");
+                } else {
+                    updateStatus("running", "Retomando o envio...");
+                }
+                break;
+            }
+
             case "VIDEO_GENERATED":
                 handleVideoGenerated(data);
                 break;
