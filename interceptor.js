@@ -304,8 +304,27 @@
       videoSubmit: isVideoSubmit,
       videoStatus: isVideoStatus,
       imageGenerate: url.indexOf('batchGenerateImages') !== -1,
-      imageUpscale: url.indexOf('upsampleImage') !== -1
+      imageUpscale: url.indexOf('upsampleImage') !== -1,
+      // v3.8.0: quando a pagina busca a midia PELO ID (ao montar o blob do
+      // download), a URL carrega ?name=<mediaId>. E a identidade exata do
+      // video que esta prestes a ser baixado.
+      mediaFetch: url.indexOf('getMediaUrl') !== -1 && url.indexOf('name=') !== -1
     };
+  }
+
+  // v3.8.0: emite o mediaId da midia que a pagina esta buscando. Disparado
+  // ANTES da resposta chegar, de proposito: o download em blob nasce depois
+  // desse fetch, entao o content.js tem tempo de registrar o nome exato.
+  function _dottiEmitMediaFetch(url) {
+    try {
+      var m = String(url || '').match(/[?&]name=([^&]+)/);
+      if (!m) return;
+      var mediaId = decodeURIComponent(m[1]);
+      document.dispatchEvent(new CustomEvent('dotti-media-fetch', {
+        detail: { mediaId: mediaId, url: String(url).substring(0, 200), timestamp: Date.now() }
+      }));
+      _DOTTI_DEBUG && console.log('[DottiInterceptor] media-fetch mediaId:', mediaId.substring(0, 12));
+    } catch (e) {}
   }
 
   // Intercept XMLHttpRequest
@@ -315,6 +334,7 @@
   XMLHttpRequest.prototype.send = function(body) {
     var url = this._dottiUrl || '';
     var checks = shouldIntercept(url);
+    if (checks.mediaFetch) _dottiEmitMediaFetch(url);
     if (checks.uploadUserImage) this.addEventListener('load', function() { processUploadResponse(this.responseText); });
     if (checks.uploadImage) this.addEventListener('load', function() {
       _DOTTI_DEBUG && console.log('[DottiInterceptor][XHR] uploadImage response, status:', this.status, 'url:', (this._dottiUrl||'').substring(0, 80));
@@ -356,6 +376,7 @@
     var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url || '');
     var p = origFetch.apply(this, arguments);
     var checks = shouldIntercept(url);
+    if (checks.mediaFetch) _dottiEmitMediaFetch(url);
     if (checks.uploadUserImage) p.then(function(r) { r.clone().text().then(processUploadResponse).catch(function(){}); }).catch(function(){});
     if (checks.uploadImage) p.then(function(r) {
       _DOTTI_DEBUG && console.log('[DottiInterceptor][FETCH] uploadImage response, status:', r.status, 'url:', url.substring(0, 80));

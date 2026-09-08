@@ -1964,11 +1964,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // avisa ANTES de clicar e o listener renomeia o que o Flow
                 // disparar. Reusa a mesma fila do Estender.
                 case "EXPECT_DOWNLOAD": {
-                    const { filename, folder } = message;
+                    const { filename, folder, placeholder } = message;
+                    // v3.8.0: placeholder = "vou clicar, mas o nome vem do
+                    // interceptor". Se nenhum mediaId chegar, o listener cancela
+                    // SEM re-baixar — nunca cria arquivo com nome chutado.
+                    if (placeholder) {
+                        _installExtendDownloadListener({ placeholder: true, folder: folder || "" });
+                        console.log("[Dotti] Download esperado (aguardando mediaId do interceptor)");
+                        sendResponse({ success: true });
+                        break;
+                    }
                     if (!filename) { sendResponse({ success: false, error: "no_filename" }); break; }
                     const full = folder ? folder + "/" + filename : filename;
                     _installExtendDownloadListener({ fullName: full, folder: folder || "" });
                     console.log("[Dotti] Download esperado:", full);
+                    sendResponse({ success: true });
+                    break;
+                }
+
+                // v3.8.0: o interceptor viu a pagina buscar a midia por id e o
+                // content ja resolveu mediaId -> prompt -> nome. Identidade exata.
+                case "EXPECT_DOWNLOAD_EXACT": {
+                    const { filename, folder, promptNumber, mediaId } = message;
+                    if (!filename) { sendResponse({ success: false }); break; }
+                    const full = folder ? folder + "/" + filename : filename;
+                    _nomeExatoPendente = { fullName: full, promptNumber, mediaId, at: Date.now() };
+                    // Se ja ha um placeholder na fila, preenche direto tambem.
+                    const head = _extendDownloadQueue[0];
+                    if (head && head.placeholder) { head.fullName = full; head.promptNumber = promptNumber; head.mediaId = mediaId; }
+                    console.log("[Dotti] Nome exato por mediaId:", full);
                     sendResponse({ success: true });
                     break;
                 }
@@ -2544,6 +2568,9 @@ let _extendDownloadQueue = []; // FIFO: [{sceneNumber, folder, totalSeconds, sta
 let _extendDownloadListener = null;
 let _extendDownloadTimeoutId = null;
 let _extendOurDownloadIds = new Set(); // IDs criados por nos (skip para evitar loop)
+// v3.8.0: nome EXATO vindo do interceptor (mediaId -> prompt), registrado
+// entre o clique no menu e o onCreated do blob. Tem prioridade sobre tudo.
+let _nomeExatoPendente = null; // { fullName, promptNumber, mediaId, at }
 
 function _installExtendDownloadListener(pending) {
     _extendDownloadQueue.push(pending);
@@ -2576,6 +2603,43 @@ function _installExtendDownloadListener(pending) {
             const next = _extendDownloadQueue.shift();
             const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
 
+            // v3.8.0: nome exato do interceptor (mediaId -> prompt) tem
+            // prioridade absoluta. Valido por 30s a partir do media-fetch.
+            let exato = null;
+            if (_nomeExatoPendente && (Date.now() - _nomeExatoPendente.at) < 30000) {
+                exato = _nomeExatoPendente;
+                _nomeExatoPendente = null;
+            }
+            const _responder = async (ok, nomeFinal) => {
+                try {
+                    if (targetTabId) await chrome.tabs.sendMessage(targetTabId, {
+                        action: 'DOWNLOAD_RESULTADO',
+                        ok: !!ok,
+                        promptNumber: exato ? exato.promptNumber : (next.promptNumber || null),
+                        mediaId: exato ? exato.mediaId : (next.mediaId || null),
+                        filename: nomeFinal || null
+                    });
+                } catch (e) { }
+            };
+            const _fecharFila = () => {
+                if (_extendDownloadQueue.length === 0) _removeExtendDownloadListener();
+                else _resetExtendDownloadTimeout();
+            };
+
+            // Placeholder sem identidade: cancela e NAO re-baixa. Sem nome
+            // exato nao existe arquivo — o tile sera retentado depois.
+            if (next.placeholder && !exato && !next.fullName) {
+                console.warn('[Extend] download nativo id=' + item.id +
+                    ' sem mediaId conhecido — cancelado SEM re-download (evita nome errado)');
+                try {
+                    await new Promise((resolve) => chrome.downloads.cancel(item.id, () => resolve()));
+                    await new Promise((resolve) => chrome.downloads.erase({ id: item.id }, () => resolve()));
+                } catch (e) { }
+                await _responder(false, null);
+                _fecharFila();
+                return;
+            }
+
             // v3.6.0: se um redirect de midia acabou de passar, ele diz QUAL
             // midia e esta. Perguntar ao content.js o nome por mediaId e exato;
             // o fullName enfileirado veio de casamento por texto, que ja errou
@@ -2600,7 +2664,7 @@ function _installExtendDownloadListener(pending) {
             // mantem o padrao SCENE_NNN_Xs.
             // Ordem de preferencia: mediaId (exato) > fullName enfileirado
             // (casamento por texto) > padrao SCENE do Estender.
-            const base = nomePorMedia || next.fullName;
+            const base = (exato && exato.fullName) || nomePorMedia || next.fullName;
             const newName = base
                 ? (base.replace(/\.[a-z0-9]+$/i, "") + "." + ext)
                 : ((next.folder || 'LetzScenes') + '/' +
@@ -2637,11 +2701,8 @@ function _installExtendDownloadListener(pending) {
                     '(URL pode ter expirado ou ser blob:)');
             }
 
-            if (_extendDownloadQueue.length === 0) {
-                _removeExtendDownloadListener();
-            } else {
-                _resetExtendDownloadTimeout();
-            }
+            await _responder(!!newId, newName);
+            _fecharFila();
         } catch (e) {
             console.error('[Extend] onCreated hook erro:', e.message);
         }
