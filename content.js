@@ -1248,7 +1248,268 @@
         _resolverPoolPorEliminacao();
     }
 
+    // ============================================================
+    // v4.0.0 — IDENTIDADE PELA API (batchexecute)
+    // ============================================================
+    // A captura de rede dela mostrou que o Flow entrega a identidade exata:
+    //   YhhmEf  envio   nosso "PROMPT NNN" -> uuids da midia
+    //   jwpduf  status  mediaId -> [2] gerando / [3] pronto (e, quando vem, o
+    //                   nosso texto na mesma transacao: amarracao direta)
+    //   as29s   URL     mediaId -> URL assinada do MP4
+    // Todo o aparato de adivinhacao (score, folga, paráfrase do titulo, pool de
+    // uuid, correlacao temporal) existia so porque faltava esta captura. Fica
+    // atras da flag abaixo, desligado.
+    const _USAR_DOM_LEGADO = false;
+
+    const _idParaPrompt = new Map();      // mediaId -> { promptNumber, via }
+    const _candidatosDoEnvio = new Map(); // uuid -> promptNumber (conjunto do envio)
+    const _uuidsPorPrompt = new Map();    // promptNumber -> Set(uuid)
+    const _uuidListaNegra = new Set();    // aparece em 2 envios: projeto/sessao
+    const _statusRecebidoEm = new Map();  // promptNumber -> timestamp do ultimo status
+    // Ajuste 3: teto por prompt SEM receber status. O timeout de task (5 min) e
+    // da geracao; este e do slot, e por isso mais folgado.
+    const _TETO_SEM_STATUS_MS = 600000;   // 10 min
+    const _ESTADO_GERANDO = 2;
+    const _ESTADO_PRONTO = 3;
+
+    // Amarracao central. `via` diz de onde veio, para o log responder se a via
+    // primaria do Ajuste 1 existe de verdade.
+    function _amarrarMedia(mediaId, promptNumber, via) {
+        if (!mediaId || !promptNumber) return null;
+        const jaTem = _idParaPrompt.get(mediaId);
+
+        if (jaTem && jaTem.promptNumber !== promptNumber) {
+            // As duas vias discordam: nao baixa. Nome errado e pior que nao baixar.
+            console.error('[Dotti] CONFLITO de identidade para ' + mediaId.substring(0, 12) +
+                ': ' + jaTem.via + ' diz #' + jaTem.promptNumber +
+                ', ' + via + ' diz #' + promptNumber + ' — NAO vou baixar este.');
+            jaTem.conflito = true;
+            return null;
+        }
+        if (jaTem) {
+            if (jaTem.via !== via && !jaTem.confirmado) {
+                jaTem.confirmado = true;
+                console.log('[Dotti] identidade confirmada por ' + via +
+                    ': ' + mediaId.substring(0, 12) + ' -> #' + promptNumber);
+            }
+            return jaTem;
+        }
+
+        const reg = { promptNumber: promptNumber, via: via, conflito: false, confirmado: false };
+        _idParaPrompt.set(mediaId, reg);
+        console.log('[Dotti] envio: #' + promptNumber + ' -> mediaId ' +
+            mediaId.substring(0, 12) + ' (via=' + via + ')');
+        return reg;
+    }
+
+    // Reforço: conjunto de candidatos do envio. Um uuid que aparece em DOIS
+    // envios diferentes e projeto/sessao, nao midia — sai de tudo.
+    function _registrarCandidatosDoEnvio(promptNumber, uuids) {
+        const meus = new Set();
+        for (const u of uuids) {
+            if (_uuidListaNegra.has(u)) continue;
+            const dono = _candidatosDoEnvio.get(u);
+            if (dono !== undefined && dono !== promptNumber) {
+                _uuidListaNegra.add(u);
+                _candidatosDoEnvio.delete(u);
+                for (const conj of _uuidsPorPrompt.values()) conj.delete(u);
+                console.log('[Dotti] uuid ' + u.substring(0, 12) +
+                    ' aparece em dois envios — e projeto/sessao, ignorado');
+                continue;
+            }
+            _candidatosDoEnvio.set(u, promptNumber);
+            meus.add(u);
+        }
+        _uuidsPorPrompt.set(promptNumber, meus);
+    }
+
+    // Resolve um mediaId: amarracao direta primeiro, candidatos do envio depois.
+    function _promptDoMedia(mediaId) {
+        const reg = _idParaPrompt.get(mediaId);
+        if (reg) return reg.conflito ? null : reg.promptNumber;
+        if (_uuidListaNegra.has(mediaId)) return null;
+        const porEnvio = _candidatosDoEnvio.get(mediaId);
+        if (porEnvio) {
+            _amarrarMedia(mediaId, porEnvio, 'envio');
+            return porEnvio;
+        }
+        return null;
+    }
+
+    // ============================================================
+    // Fila de download — INDEPENDENTE do slot
+    // ============================================================
+    // Antes o slot so liberava quando o prompt fechava, e o prompt so fechava
+    // no download (content.js, DOWNLOAD_RESULTADO). Qualquer falha de download
+    // travava a geracao inteira em 8/8. Agora o slot libera no status [3] e a
+    // fila abaixo tem retry proprio: pode falhar sem parar nada.
+    const _filaDownload = [];          // [{ mediaId, promptNumber, tentativas }]
+    const _downloadEmVoo = new Set();  // promptNumber
+    let _bombeandoFila = false;
+    const _MAX_TENTATIVAS_DOWNLOAD = 3;
+    const _urlAssinadaPorId = new Map();   // mediaId -> { url, at }
+
+    function _enfileirarDownload(mediaId, promptNumber) {
+        if (!mediaId || !promptNumber) return;
+        if (_downloadEmVoo.has(promptNumber)) return;
+        const alvo = _promptList.find(p => p.number === promptNumber);
+        if (alvo && alvo.downloaded) return;
+        if (_filaDownload.some(x => x.mediaId === mediaId)) return;
+        _filaDownload.push({ mediaId: mediaId, promptNumber: promptNumber, tentativas: 0 });
+        _bombearFilaDownload();
+    }
+
+    // A URL assinada expira (~6h): pedimos sempre na hora, nunca guardamos
+    // URL velha para reusar depois.
+    function _pedirUrlAssinada(mediaId, timeoutMs) {
+        return new Promise((resolve) => {
+            let pronto = false;
+            const ouvir = (ev) => {
+                const d = ev.detail || {};
+                if (d.mediaId !== mediaId) return;
+                pronto = true;
+                document.removeEventListener('dotti-flow-url', ouvir);
+                resolve(d.url || null);
+            };
+            document.addEventListener('dotti-flow-url', ouvir);
+            document.dispatchEvent(new CustomEvent('dotti-pedir-url', { detail: { mediaId: mediaId } }));
+            setTimeout(() => {
+                if (pronto) return;
+                document.removeEventListener('dotti-flow-url', ouvir);
+                resolve(null);
+            }, timeoutMs || 15000);
+        });
+    }
+
+    async function _bombearFilaDownload() {
+        if (_bombeandoFila) return;
+        _bombeandoFila = true;
+        try {
+            while (_filaDownload.length && !_stopRequested) {
+                const item = _filaDownload.shift();
+                const alvo = _promptList.find(p => p.number === item.promptNumber);
+                if (!alvo || alvo.downloaded) continue;
+
+                _downloadEmVoo.add(item.promptNumber);
+                try {
+                    const url = await _pedirUrlAssinada(item.mediaId);
+                    if (!url) throw new Error('sem URL assinada');
+
+                    const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
+                    console.log('[Dotti] baixando #' + alvo.number + ' -> ' + url.substring(0, 90));
+
+                    const r = await chrome.runtime.sendMessage({
+                        action: 'DOWNLOAD_BY_MEDIA_ID',
+                        mediaId: item.mediaId,
+                        url: url,
+                        filename: nome,
+                        folder: _downloadFolder
+                    });
+                    if (!r || !r.success) throw new Error((r && r.error) || 'background recusou');
+
+                    alvo.foundVideos = (alvo.foundVideos || 0) + 1;
+                    if (alvo.foundVideos >= (alvo.expectedVideos || 1)) alvo.downloaded = true;
+                    notifyPanel({
+                        type: 'VIDEO_DOWNLOADED',
+                        data: { promptNumber: alvo.number, mediaId: item.mediaId, url: null, downloadFolder: _downloadFolder }
+                    });
+                    console.log('[Dotti] baixado #' + alvo.number + ' -> ' + nome);
+                } catch (e) {
+                    item.tentativas++;
+                    console.warn('[Dotti] download #' + item.promptNumber + ' falhou (' +
+                        item.tentativas + '/' + _MAX_TENTATIVAS_DOWNLOAD + '): ' + e.message);
+                    if (item.tentativas < _MAX_TENTATIVAS_DOWNLOAD) {
+                        _filaDownload.push(item);   // vai para o fim da fila
+                        await sleep(3000);
+                    } else {
+                        console.error('[Dotti] desisto do download de #' + item.promptNumber +
+                            ' apos ' + item.tentativas + ' tentativas. O video EXISTE no Flow ' +
+                            '(status pronto) — conta como GERADO, sem arquivo.');
+                    }
+                } finally {
+                    _downloadEmVoo.delete(item.promptNumber);
+                }
+                await sleep(400);
+            }
+        } finally {
+            _bombeandoFila = false;
+        }
+    }
+
+    // Libera o slot do prompt e marca como gerado. Chamado no status [3] — e
+    // tambem no estado desconhecido e no teto de tempo, cada um com seu motivo.
+    function _liberarSlotDoPrompt(promptNumber, motivo, gerado) {
+        const alvo = _promptList.find(p => p.number === promptNumber);
+        if (!alvo) return;
+        const slot = _slots.findIndex(u => u === alvo.uuid);
+        if (slot !== -1) _slots[slot] = null;
+
+        if (gerado) {
+            if (!alvo.gerado) {
+                alvo.gerado = true;
+                notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: alvo.number } });
+            }
+            if (alvo.status === 'generating' || alvo.status === 'sending') alvo.status = 'complete';
+            console.log('[Dotti] PRONTO: #' + alvo.number + ' (' + motivo + ') — slot liberado');
+        } else {
+            if (alvo.status === 'generating' || alvo.status === 'sending') {
+                alvo.status = 'aguardando_verificacao';
+            }
+            console.warn('[Dotti] #' + alvo.number + ' — slot liberado sem video (' + motivo +
+                '). SEM reenvio automatico.');
+            notifyPanel({ type: 'PROMPT_STATUS', data: { number: alvo.number, status: 'aguardando_verificacao' } });
+        }
+    }
+
     function setupApiInterceptorListeners() {
+        // ---- v4.0.0: identidade e ciclo de vida pela API ----
+        document.addEventListener('dotti-flow-envio', (e) => {
+            const d = e.detail || {};
+            if (!d.promptNumber || !d.uuids || !d.uuids.length) return;
+            _registrarCandidatosDoEnvio(d.promptNumber, d.uuids);
+            console.log('[Dotti] envio: #' + d.promptNumber + ' -> ' + d.uuids.length +
+                ' uuid candidato(s)');
+        });
+
+        document.addEventListener('dotti-flow-status', (e) => {
+            const d = e.detail || {};
+            if (!d.mediaId) return;
+            _statusRecebidoEm.set(d.mediaId, Date.now());
+
+            // Ajuste 1 dela: se o nosso texto veio na MESMA transacao, esta e a
+            // amarracao primaria — direta, sem candidatos.
+            if (d.promptNumber) _amarrarMedia(d.mediaId, d.promptNumber, 'jwpduf');
+
+            const n = _promptDoMedia(d.mediaId);
+            if (!n) {
+                console.log('[Dotti] status de midia sem prompt conhecido: ' +
+                    String(d.mediaId).substring(0, 12) + ' (estado ' + d.estado + ')');
+                return;
+            }
+            _statusRecebidoEm.set(n, Date.now());
+
+            if (d.estado === _ESTADO_GERANDO) return;
+
+            if (d.estado === _ESTADO_PRONTO) {
+                _liberarSlotDoPrompt(n, 'status [3]', true);
+                _enfileirarDownload(d.mediaId, n);
+                return;
+            }
+
+            // Ajuste 2 dela: estado que ninguem viu na captura. Nunca deixar
+            // cair no ramo "ainda gerando" — o slot ficaria preso para sempre.
+            console.warn('[Dotti] status desconhecido do jwpduf: ' + d.estado +
+                ' (mediaId ' + String(d.mediaId).substring(0, 12) + ', prompt #' + n +
+                ') — tratando como terminal');
+            _liberarSlotDoPrompt(n, 'status desconhecido ' + d.estado, false);
+        });
+
+        document.addEventListener('dotti-flow-url', (e) => {
+            const d = e.detail || {};
+            if (d.mediaId && d.url) _urlAssinadaPorId.set(d.mediaId, { url: d.url, at: Date.now() });
+            if (d.mediaId && d.promptNumber) _amarrarMedia(d.mediaId, d.promptNumber, 'as29s');
+        });
+
         // v3.9.3: uuid vindos das respostas de RPC (e do erro do Angular).
         document.addEventListener('dotti-uuids', (e) => {
             const uuids = e.detail && e.detail.uuids;
@@ -2894,6 +3155,22 @@
                 break;
             }
 
+            // v4.0.0 (Ajuste 3 dela) — TETO DE TEMPO NO SLOT.
+            // Mesmo com o slot desacoplado do download, se o jwpduf parar de
+            // ser chamado para um mediaId (aba em segundo plano, rede, o Flow
+            // desistindo do polling) o slot prende e a execucao trava do mesmo
+            // jeito. Aqui ele e liberado por tempo — e NUNCA reenviado.
+            {
+                const agora = Date.now();
+                for (const t of _promptList) {
+                    if (t.status !== 'generating' || !t.startedAt) continue;
+                    const ultimo = _statusRecebidoEm.get(t.number) || t.startedAt;
+                    if (agora - ultimo <= _TETO_SEM_STATUS_MS) continue;
+                    _liberarSlotDoPrompt(t.number,
+                        'sem status ha ' + Math.round((agora - ultimo) / 60000) + ' min', false);
+                }
+            }
+
             // LIMPEZA DE SLOTS ORFAOS: tasks que ja completaram/falharam
             for (let slotIdx = 0; slotIdx < _slots.length; slotIdx++) {
                 const uuid = _slots[slotIdx];
@@ -3151,6 +3428,24 @@
             console.log('[Dotti] Fim: ' + contaNaoGerado + ' nao gerado(s), ' +
                 contaGeradoSemBaixar + ' gerado(s) sem download. ' +
                 'Reenvio so sob autorizacao, agora que a lista inteira ja foi enviada.');
+        }
+
+        // v4.0.0: a fila de download e independente do envio, entao ela pode
+        // ainda estar trabalhando quando o loop de envio termina. Esperar aqui
+        // para o resumo dizer a verdade.
+        if (_filaDownload.length || _downloadEmVoo.size) {
+            console.log('[Dotti] Envio terminado — aguardando ' +
+                (_filaDownload.length + _downloadEmVoo.size) + ' download(s) na fila.');
+            const limite = Date.now() + 300000;   // 5 min de teto
+            while ((_filaDownload.length || _downloadEmVoo.size) &&
+                   Date.now() < limite && !_stopRequested) {
+                await sleep(1000);
+            }
+            if (_filaDownload.length || _downloadEmVoo.size) {
+                console.warn('[Dotti] Fila de download ainda com ' +
+                    (_filaDownload.length + _downloadEmVoo.size) +
+                    ' item(ns) apos 5 min — seguindo para o resumo.');
+            }
         }
 
         // v3.9.0: resumo pronto, para ela nao ter que cruzar a lista com o log
@@ -3536,6 +3831,10 @@
     }
 
     function scrollToRevealMore() {
+        // v4.0.0: rolar a grade so faz sentido no caminho por DOM. A API nao
+        // depende do que esta na tela.
+        if (!_USAR_DOM_LEGADO) return;
+
         const tentar = (el) => {
             if (!el || el.scrollHeight <= el.clientHeight) return false;
 
@@ -4158,6 +4457,13 @@
     }
 
     async function _scanTilesParaDownload() {
+        // v4.0.0: o caminho por DOM (titulo do tile, score, menu more_vert,
+        // rolagem da grade, disjuntor, teto por tile, pool de uuid) existia
+        // para ADIVINHAR o que a API agora entrega de graca. Fica aqui,
+        // desligado, para o caso de o Flow mudar de novo — nao integrado com o
+        // caminho novo, porque mante-lo vivo e reintroduzir o bug.
+        if (!_USAR_DOM_LEGADO) return;
+
         if (!_autoDownload) {
             // Nao retornar calado: foi o silencio que escondeu a falha antes.
             if (!_avisouAutoDownloadOff) {
@@ -5879,7 +6185,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.9.4 ready (lotes e parada pelo painel; uuid por eliminacao)");
+        console.log("[Lets Automate] v4.0.0 ready (identidade pela API do Flow: batchexecute)");
     }
 
     if (document.readyState === "loading") {
