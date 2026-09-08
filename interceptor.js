@@ -340,13 +340,22 @@
       // (zero linhas 'media-fetch' no log dela) — a pagina monta o blob por
       // outra rota. Agora emite para qualquer URL que carregue um id de midia;
       // quem filtra e o content.js, contra o _mediaTracker.
-      mediaFetch: _DOTTI_RE_ID.test(url)
+      mediaFetch: _DOTTI_RE_ID.test(url) || _DOTTI_RE_UUID_PATH.test(url)
     };
   }
 
   // Qualquer parametro que carregue um id de midia. Deliberadamente amplo:
   // e o content.js que decide se o id e conhecido.
   var _DOTTI_RE_ID = /[?&](?:name|mediaKey|mediaId|id)=[A-Za-z0-9_.:-]{8,}/;
+
+  // v3.9.2: o id da midia tambem vem no CAMINHO, nao so na query. Foi por isso
+  // que o dotti-media-fetch nunca disparou: o regex acima exigia ?name=... e a
+  // URL real do download e
+  //     https://flow-content.google/video/<uuid>?Expires=...
+  // Conferido em quatro pares do log dela: o uuid que aparece logo depois do
+  // envio de um prompt e exatamente o uuid que a pagina busca ao baixar aquele
+  // video. E a identidade exata que faltava.
+  var _DOTTI_RE_UUID_PATH = /\/(?:video|media|image)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
   // Janela de diagnostico: enquanto ativa, loga as URLs vistas. O content.js
   // liga isso em volta do clique de download, para o proximo log dizer de vez
@@ -366,7 +375,8 @@
   // desse fetch, entao o content.js tem tempo de registrar o nome exato.
   function _dottiEmitMediaFetch(url) {
     try {
-      var m = String(url || '').match(/[?&](?:name|mediaKey|mediaId|id)=([^&]+)/);
+      var u = String(url || '');
+      var m = u.match(/[?&](?:name|mediaKey|mediaId|id)=([^&]+)/) || u.match(_DOTTI_RE_UUID_PATH);
       if (!m) return;
       var mediaId = decodeURIComponent(m[1]);
       document.dispatchEvent(new CustomEvent('dotti-media-fetch', {
@@ -461,5 +471,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v3.9.0 ativo');
+  console.log('[DottiInterceptor] v3.9.2 ativo');
 })();

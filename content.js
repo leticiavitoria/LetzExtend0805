@@ -1153,6 +1153,24 @@
 
     const _idsDesconhecidos = new Set();
 
+    // v3.9.2: rotulo do tile -> numero do prompt, aprendido pelo mediaId da URL
+    // do download. Identidade exata, sobrevive as passadas seguintes.
+    const _rotuloParaPrompt = new Map();
+
+    // A chave do _mediaTracker vem da resposta do envio e pode chegar como
+    // "<uuid>" ou como "media/<uuid>" / "operations/<uuid>". Casa exato e,
+    // falhando, por sufixo — sem inventar: ou o id bate, ou nao.
+    function _acharNoTracker(mediaId) {
+        const direto = _mediaTracker.get(mediaId);
+        if (direto) return direto;
+        const id = String(mediaId);
+        for (const [k, v] of _mediaTracker.entries()) {
+            const ks = String(k);
+            if (ks.endsWith('/' + id) || id.endsWith('/' + ks)) return v;
+        }
+        return null;
+    }
+
     function setupApiInterceptorListeners() {
         // Video submitted -> popular _mediaTracker (identico DarkPlanner)
         // v3.8.0: a pagina esta buscando uma midia PELO ID — e o video que vai
@@ -1162,7 +1180,7 @@
         document.addEventListener('dotti-media-fetch', (e) => {
             const mediaId = e.detail && e.detail.mediaId;
             if (!mediaId) return;
-            const track = _mediaTracker.get(mediaId);
+            const track = _acharNoTracker(mediaId);
             if (!track || !track.promptNumber) {
                 // v3.9.0: o filtro do interceptor ficou amplo de proposito, entao
                 // id desconhecido e normal. Loga uma vez por id para nao poluir.
@@ -1174,6 +1192,18 @@
             }
             const alvo = _promptList.find(p => p.number === track.promptNumber);
             if (!alvo) return;
+
+            // v3.9.2: a busca da midia acontece no instante do clique, entao o
+            // tile que estamos baixando AGORA e este. Amarrar o rotulo ao
+            // prompt torna aquele tile identificado de forma exata dali em
+            // diante — e o INCERTO nao volta para ele.
+            if (_downloadAtual && _downloadAtual.rotulo) {
+                if (!_rotuloParaPrompt.has(_downloadAtual.rotulo)) {
+                    console.log('[Dotti] Tile identificado pelo mediaId: "' +
+                        _downloadAtual.rotulo.substring(0, 40) + '" -> #' + alvo.number);
+                }
+                _rotuloParaPrompt.set(_downloadAtual.rotulo, alvo.number);
+            }
 
             // A API ja confirmou que existe: conta como GERADO agora.
             if (!alvo.gerado) {
@@ -2171,6 +2201,7 @@
         _tilesTentativas.clear();
         _tilesDesistidos.clear();
         _promptsEmDownload.clear();
+        _tilesSemIdentidade.clear();
         _falhasSeguidas = 0;
         _downloadSuspenso = false;
         _gradeScrollEl = null;
@@ -2993,12 +3024,23 @@
                 console.log('[Dotti] RESUMO — ' + _tilesDesistidos.size +
                     ' tile(s) postos de escanteio apos ' + _MAX_TENTATIVAS_TILE + ' tentativas');
             }
+            // v3.9.2: tile pronto que ficou sem identidade e PROVA de que o
+            // video existe. Dizer isso em vez de deixar parecer que todos os
+            // pendentes falharam na plataforma — foi o que aconteceu com os
+            // prompts 176/177/179/182/183, que existiam e sairam como NAO
+            // GERADO.
+            if (_tilesSemIdentidade.size) {
+                console.log('[Dotti] RESUMO — ' + _tilesSemIdentidade.size +
+                    ' tile(s) prontos SEM identificacao (o video existe no Flow; ' +
+                    'parte dos "nao gerados" acima e na verdade um destes)');
+            }
             notifyPanel({
                 type: 'RUN_SUMMARY',
                 data: {
                     geradosSemDownload: geradosSemArquivo,
                     naoGerados: nuncaVistos,
-                    tilesDesistidos: _tilesDesistidos.size
+                    tilesDesistidos: _tilesDesistidos.size,
+                    tilesSemIdentidade: _tilesSemIdentidade.size
                 }
             });
         }
@@ -3708,6 +3750,9 @@
     // vezes no log dela: foundVideos so sobe quando o DOWNLOAD_RESULTADO volta,
     // e a passada seguinte ainda via o prompt como pendente.
     const _promptsEmDownload = new Set();
+    // Tiles prontos que o scanner viu mas nao conseguiu identificar. Prova de
+    // que o video EXISTE — nao pode ser contado como "nao gerado" no fecho.
+    const _tilesSemIdentidade = new Set();
     const _MAX_TENTATIVAS_TILE = 3;
     const _ESPERA_DOWNLOAD_MS = 8000;     // era 15s: 6 tiles x 15s = loop de 90s
     // Disjuntor global: se o download esta quebrado (nada e criado), parar de
@@ -3840,11 +3885,30 @@
         return null;
     }
 
+    // v3.9.2: o mesmo INCERTO saiu milhares de vezes no log dela (5 linhas a
+    // cada 5s ate o fim da execucao). Loga uma vez por rotulo e so repete se o
+    // motivo mudar.
+    const _incertosLogados = new Map();
+    function _logarIncertoUmaVez(rotulo, motivo) {
+        if (_incertosLogados.get(rotulo) === motivo) return;
+        _incertosLogados.set(rotulo, motivo);
+        console.log('[Dotti Scanner] INCERTO — ' + motivo +
+            ', vou tentar identificar pelo mediaId:', rotulo.substring(0, 45));
+    }
+
     // v3.4.3: decisao em tres niveis. Nomear errado e pior do que nao baixar,
     // entao no caso duvidoso devolve null e o tile NAO e marcado — a proxima
     // varredura tenta de novo.
     function _casarTileComPrompt(rotulo) {
         if (!rotulo || rotulo.trim().length <= 5) return null;
+
+        // v3.9.2: rotulo ja resolvido por mediaId numa passada anterior.
+        // Identidade exata; nem entra na disputa por score.
+        const aprendido = _rotuloParaPrompt.get(rotulo);
+        if (aprendido) {
+            const p = _promptList.find(x => x.number === aprendido);
+            if (p) return p;
+        }
 
         const enviados = _promptsJaEnviados();
         if (!enviados.length) return null;
@@ -3871,9 +3935,9 @@
         const seg = notas[1];
 
         if (!top || top.s < _SCORE_MINIMO) {
-            console.log('[Dotti Scanner] INCERTO — score baixo (' +
+            _logarIncertoUmaVez(rotulo, 'score baixo (' +
                 (top ? top.s.toFixed(2) : '0.00') + ' < ' + _SCORE_MINIMO +
-                ') entre ' + enviados.length + ' enviados:', rotulo.substring(0, 45));
+                ') entre ' + enviados.length + ' enviados');
             return null;
         }
 
@@ -3882,9 +3946,8 @@
             (top.s - seg.s) >= _DELTA_FOLGA;
 
         if (!temFolga) {
-            console.log('[Dotti Scanner] INCERTO — ambiguo (#' + top.p.number + ' ' +
-                top.s.toFixed(2) + ' vs #' + seg.p.number + ' ' + seg.s.toFixed(2) +
-                '), nao vou chutar:', rotulo.substring(0, 45));
+            _logarIncertoUmaVez(rotulo, 'ambiguo (#' + top.p.number + ' ' +
+                top.s.toFixed(2) + ' vs #' + seg.p.number + ' ' + seg.s.toFixed(2) + ')');
             return null;
         }
 
@@ -3942,38 +4005,51 @@
                 alvo = _casarTileComPrompt(rotulo);
             }
 
-            if (!alvo) {
-                // Sem identidade nao baixa e NAO desiste: o titulo da API pode
-                // chegar na proxima varredura. Como nao ha clique, isso nao
-                // trava nada — so nao produz arquivo ainda.
-                continue;
+            if (alvo) {
+                if (alvo.downloaded || (alvo.foundVideos || 0) >= (alvo.expectedVideos || 1)) {
+                    _tilesBaixados.add(rotulo);
+                    continue;
+                }
+                // Ja tem um download deste prompt em voo: nao dispara outro.
+                if (_promptsEmDownload.has(alvo.number)) continue;
+
+                // A API/DOM confirmam que existe: conta como GERADO ja, mesmo
+                // que o download ainda nao tenha acontecido. Regra dela: so e
+                // "nao gerado" se deu erro na plataforma ou se ainda esta
+                // gerando.
+                if (!alvo.gerado) {
+                    alvo.gerado = true;
+                    notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: alvo.number } });
+                }
+            } else {
+                // v3.9.2: SEM identidade, mas o tile esta pronto — o video
+                // existe. Na v3.9.1 isso era "nao clica", e foi assim que os
+                // prompts 176, 177, 179, 182 e 183 ficaram presos em INCERTO
+                // ate o fim e foram reportados como NAO GERADO, sendo que
+                // existiam no Flow.
+                //
+                // Agora clica com placeholder: a identidade vem da URL do
+                // download (flow-content.google/video/<mediaId>), que o
+                // interceptor le no instante do clique. Se nenhum mediaId
+                // conhecido chegar, o background CANCELA SEM RE-BAIXAR — a
+                // regra "nome errado e pior que nao baixar" continua intacta —
+                // e o teto de 3 tentativas evita repeticao infinita.
+                _tilesSemIdentidade.add(rotulo);
             }
 
-            if (alvo.downloaded || (alvo.foundVideos || 0) >= (alvo.expectedVideos || 1)) {
-                _tilesBaixados.add(rotulo);
-                continue;
-            }
-
-            // Ja tem um download deste prompt em voo: nao dispara outro.
-            if (_promptsEmDownload.has(alvo.number)) continue;
-
-            // A API/DOM confirmam que existe: conta como GERADO ja, mesmo que o
-            // download ainda nao tenha acontecido. Regra dela: so e "nao gerado"
-            // se deu erro na plataforma ou se ainda esta gerando.
-            if (!alvo.gerado) {
-                alvo.gerado = true;
-                notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: alvo.number } });
-            }
-
-            const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
+            const nome = alvo ? _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1) : null;
 
             try {
-                await chrome.runtime.sendMessage({
+                await chrome.runtime.sendMessage(alvo ? {
                     action: 'EXPECT_DOWNLOAD',
                     filename: nome,
                     folder: _downloadFolder,
                     promptNumber: alvo.number,
                     mediaId: mediaId
+                } : {
+                    action: 'EXPECT_DOWNLOAD',
+                    placeholder: true,
+                    folder: _downloadFolder
                 });
             } catch (e) {
                 console.warn('[Dotti Scanner] EXPECT_DOWNLOAD falhou:', e.message);
@@ -3998,21 +4074,25 @@
                 }, _ESPERA_DOWNLOAD_MS);
             });
 
-            console.log('[Dotti Scanner] Baixando tile -> #' + alvo.number + ' ' + nome);
-            _promptsEmDownload.add(alvo.number);
+            console.log(alvo
+                ? ('[Dotti Scanner] Baixando tile -> #' + alvo.number + ' ' + nome)
+                : ('[Dotti Scanner] Baixando tile sem identidade (nome vem do mediaId): ' +
+                    rotulo.substring(0, 45)));
+            if (alvo) _promptsEmDownload.add(alvo.number);
             const clicou = await baixarTilePeloMenu(tile);
             if (!clicou) {
                 _downloadAtual = null;
-                _promptsEmDownload.delete(alvo.number);
+                if (alvo) _promptsEmDownload.delete(alvo.number);
                 _registrarFalhaDeTile(rotulo, 'menu nao abriu');
                 await sleep(800);
                 continue;
             }
 
             const res = await esperaResultado;
-            _promptsEmDownload.delete(alvo.number);
+            if (alvo) _promptsEmDownload.delete(alvo.number);
             if (res && res.ok) {
                 _tilesBaixados.add(rotulo);
+                _tilesSemIdentidade.delete(rotulo);
                 _tilesTentativas.delete(rotulo);
                 _falhasSeguidas = 0;
             } else {
@@ -5576,7 +5656,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.9.1 ready (rolagem verificada da grade)");
+        console.log("[Lets Automate] v3.9.2 ready (identidade pelo mediaId da URL do download)");
     }
 
     if (document.readyState === "loading") {
