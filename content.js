@@ -910,6 +910,13 @@
     // EXECUTE PROMPT (CALLED BY BACKGROUND)
     // ============================================
 
+    // v3.9.0: enquanto um prompt esta sendo preenchido/enviado, o scanner de
+    // download NAO pode mexer na tela. Com o overlay do menu do tile aberto, o
+    // slate-helper perdia os botoes de modo ("Duration button 8s not found",
+    // switchMode -> not_found) e o envio degradava. Envio tem prioridade;
+    // download e trabalho de fundo.
+    let _enviandoAgora = false;
+
     async function executePrompt(prompt) {
         console.log("[Dotti DOM] ========================================");
         console.log("[Dotti DOM] Executando PROMPT", prompt.number);
@@ -917,8 +924,13 @@
         console.log("[Dotti DOM] Elementos:", prompt.elements);
         console.log("[Dotti DOM] MediaType:", _mediaType, "| imageDataUrl:", prompt.imageDataUrl ? "sim" : "nao");
 
+        _enviandoAgora = true;
         try {
             const hasElements = prompt.elements && prompt.elements.length > 0;
+
+            // Qualquer menu de tile aberto some antes de comecar: e ele que
+            // escondia os botoes de modo do slate-helper.
+            try { _fecharMenus(); } catch (e) { }
 
             console.log("[Dotti DOM] Passo 1: Limpando elementos residuais...");
             await clearElements();
@@ -995,6 +1007,8 @@
         } catch (error) {
             console.error("[Dotti DOM] ERRO CRITICO:", error);
             return { success: false, error: error.message };
+        } finally {
+            _enviandoAgora = false;
         }
     }
 
@@ -1137,6 +1151,8 @@
         console.log('[Dotti] SlateHelper injected into MAIN WORLD');
     }
 
+    const _idsDesconhecidos = new Set();
+
     function setupApiInterceptorListeners() {
         // Video submitted -> popular _mediaTracker (identico DarkPlanner)
         // v3.8.0: a pagina esta buscando uma midia PELO ID — e o video que vai
@@ -1148,7 +1164,12 @@
             if (!mediaId) return;
             const track = _mediaTracker.get(mediaId);
             if (!track || !track.promptNumber) {
-                console.log('[Dotti] media-fetch mediaId sem prompt conhecido:', String(mediaId).substring(0, 12));
+                // v3.9.0: o filtro do interceptor ficou amplo de proposito, entao
+                // id desconhecido e normal. Loga uma vez por id para nao poluir.
+                if (!_idsDesconhecidos.has(mediaId)) {
+                    _idsDesconhecidos.add(mediaId);
+                    console.log('[Dotti] media-fetch id sem prompt conhecido:', String(mediaId).substring(0, 12));
+                }
                 return;
             }
             const alvo = _promptList.find(p => p.number === track.promptNumber);
@@ -1232,7 +1253,12 @@
                         prompt: entry.prompt || '',
                         promptNumber: matchedPromptNumber,
                         status: 'PENDING',
-                        operationName: entry.operationName || ''
+                        operationName: entry.operationName || '',
+                        // v3.9.0: titulo curto gerado pelo Flow. O tile do grid
+                        // usa esse mesmo texto no aria-label, entao ele casa
+                        // tile <-> mediaId por igualdade, sem heuristica.
+                        title: entry.title || '',
+                        thumbUrl: entry.thumbUrl || ''
                     };
 
                     // Se a API nao retornou prompt mas temos match, copiar do prompt list
@@ -1274,6 +1300,12 @@
 
                     if (tracked) {
                         tracked.status = update.status;
+                        // v3.9.0: no COMPLETED a API costuma trazer o titulo ja
+                        // definitivo; no envio ele ainda pode vir vazio.
+                        if (update.title && !tracked.title) tracked.title = update.title;
+                        if (update.thumbUrl && !tracked.thumbUrl) tracked.thumbUrl = update.thumbUrl;
+
+                        if (update.status === 'COMPLETED') _religarDownload();
 
                         if (update.status === 'COMPLETED' && tracked.promptNumber) {
                             const prompt = _promptList.find(p => p.number === tracked.promptNumber);
@@ -2133,6 +2165,13 @@
         _nextItemIndex = 0;
         _processedFailedPrompts.clear();
         _processedFailedTileIds.clear();
+        // v3.9.0: estado do download por tile e do disjuntor. Sem isso um run
+        // novo herdaria os tiles desistidos e o download suspenso do anterior.
+        _tilesBaixados.clear();
+        _tilesTentativas.clear();
+        _tilesDesistidos.clear();
+        _falhasSeguidas = 0;
+        _downloadSuspenso = false;
     }
 
     // setPromptList — com campos identicos ao taskList do DarkPlanner
@@ -2933,6 +2972,34 @@
                 'Reenvio so sob autorizacao, agora que a lista inteira ja foi enviada.');
         }
 
+        // v3.9.0: resumo pronto, para ela nao ter que cruzar a lista com o log
+        // a mao. Separa o que existe no Flow e nao baixou do que nunca ficou
+        // pronto — sao coisas diferentes e exigem acoes diferentes.
+        {
+            const semArquivo = _promptList.filter(t =>
+                t.startedAt && !t.downloaded &&
+                (t.foundVideos || 0) < (t.expectedVideos || 1));
+            const geradosSemArquivo = semArquivo.filter(t => t.gerado).map(t => t.number);
+            const nuncaVistos = semArquivo.filter(t => !t.gerado).map(t => t.number);
+            const lista = (a) => a.length ? a.join(', ') : '(nenhum)';
+            console.log('[Dotti] RESUMO — gerados sem download (' + geradosSemArquivo.length +
+                '): ' + lista(geradosSemArquivo));
+            console.log('[Dotti] RESUMO — enviados e nunca vistos prontos (' + nuncaVistos.length +
+                '): ' + lista(nuncaVistos));
+            if (_tilesDesistidos.size) {
+                console.log('[Dotti] RESUMO — ' + _tilesDesistidos.size +
+                    ' tile(s) postos de escanteio apos ' + _MAX_TENTATIVAS_TILE + ' tentativas');
+            }
+            notifyPanel({
+                type: 'RUN_SUMMARY',
+                data: {
+                    geradosSemDownload: geradosSemArquivo,
+                    naoGerados: nuncaVistos,
+                    tilesDesistidos: _tilesDesistidos.size
+                }
+            });
+        }
+
         // Finalizar
         _isRunning = false;
         stopVideoUrlScanner();
@@ -3571,6 +3638,21 @@
     // rajada (10 "Download esperado" sem nenhum download criado).
     let _downloadAtual = null; // { rotulo, resolve }
 
+    // v3.9.0 — NUNCA TRAVAR.
+    // No log dela os mesmos 6 tiles foram clicados centenas de vezes e a
+    // execucao inteira congelou (pending=77 gen=7 slots=7/7 do Loop #10 ao
+    // #60, zero arquivos). Causa: o rotulo so entra em _tilesBaixados quando o
+    // download DA CERTO; como nunca dava, o reclique era infinito.
+    const _tilesTentativas = new Map();   // rotulo -> cliques que nao viraram arquivo
+    const _tilesDesistidos = new Set();   // postos de escanteio ate o fim do run
+    const _MAX_TENTATIVAS_TILE = 3;
+    const _ESPERA_DOWNLOAD_MS = 8000;     // era 15s: 6 tiles x 15s = loop de 90s
+    // Disjuntor global: se o download esta quebrado (nada e criado), parar de
+    // clicar e dizer isso em voz alta, em vez de girar em falso.
+    let _falhasSeguidas = 0;
+    const _MAX_FALHAS_SEGUIDAS = 5;
+    let _downloadSuspenso = false;
+
     let _avisouAutoDownloadOff = false;
 
     // Palavras sem valor discriminante — saem antes de pontuar
@@ -3638,6 +3720,63 @@
             (p.foundVideos || 0) < (p.expectedVideos || 1));
     }
 
+    // ============================================
+    // v3.9.0 — NIVEL 0: casamento EXATO por titulo da API
+    // ============================================
+    // O aria-label do tile e o titulo curto que o Flow gera (uma parafrase do
+    // prompt). Por anos tentei deduzir o prompt a partir dele — falhou por
+    // prefixo, por pool com nao-enviados, por pool que so cresce. A virada:
+    // esse MESMO titulo vem na resposta da API ao lado do mediaId
+    // (mediaMetadata.mediaTitle). Entao a parafrase deixa de ser adivinhacao e
+    // vira chave de juncao exata:
+    //     tile aria-label == mediaTitle -> mediaId -> promptNumber
+    function _normTitulo(s) {
+        return String(s || "")
+            .replace(/[…]+\s*$/, "")          // corte do grid
+            .replace(/\.\.\.\s*$/, "")
+            .toLowerCase()
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    // Miniatura: segunda chave exata. Compara sem query string, porque o Flow
+    // acrescenta parametros de tamanho que mudam entre o DOM e a API.
+    function _normThumb(u) {
+        const s = String(u || "").trim();
+        if (!s) return "";
+        const q = s.indexOf("?");
+        return (q === -1 ? s : s.slice(0, q)).replace(/^https?:\/\//, "");
+    }
+
+    // Devolve { prompt, mediaId } quando a identidade e EXATA, senao null.
+    function _identidadeExataDoTile(tile, rotulo) {
+        const alvoTitulo = _normTitulo(rotulo);
+        const truncado = /[…]\s*$|\.\.\.\s*$/.test(String(rotulo).trim());
+        let thumbTile = "";
+        try {
+            const img = tile && tile.querySelector("img");
+            thumbTile = _normThumb(img && (img.src || img.getAttribute("src")));
+        } catch (e) { }
+
+        for (const [mediaId, tr] of _mediaTracker.entries()) {
+            if (!tr || !tr.promptNumber) continue;
+
+            let bate = false;
+            const tApi = _normTitulo(tr.title);
+            if (alvoTitulo && tApi) {
+                // Titulo cortado no grid: casa por prefixo do lado da API.
+                bate = truncado ? tApi.startsWith(alvoTitulo) : (tApi === alvoTitulo);
+            }
+            if (!bate && thumbTile && _normThumb(tr.thumbUrl) === thumbTile) bate = true;
+            if (!bate) continue;
+
+            const alvo = _promptList.find(p => p.number === tr.promptNumber);
+            if (alvo) return { prompt: alvo, mediaId: mediaId };
+        }
+        return null;
+    }
+
     // v3.4.3: decisao em tres niveis. Nomear errado e pior do que nao baixar,
     // entao no caso duvidoso devolve null e o tile NAO e marcado — a proxima
     // varredura tenta de novo.
@@ -3701,6 +3840,11 @@
             return;
         }
 
+        // Envio tem prioridade: mexer no menu agora quebraria o switchMode.
+        if (_enviandoAgora) return;
+
+        if (_downloadSuspenso) return;
+
         const tiles = _tilesProntos();
         if (!tiles.length) {
             // Log explicito: o silencio de antes foi o que escondeu a falha.
@@ -3710,24 +3854,74 @@
         }
 
         for (const tile of tiles) {
-            const rotulo = (tile.getAttribute("aria-label") || "").trim();
-            if (!rotulo || _tilesBaixados.has(rotulo)) continue;
+            if (_stopRequested || !_scannerActive) return;
+            if (_enviandoAgora) return;   // chegou prompt para enviar: sai na hora
+            if (_downloadSuspenso) return;
 
-            // v3.8.0: NAO casa mais por texto para decidir clicar. Clica em
-            // todo tile pronto ainda nao baixado; a identidade vem do
-            // interceptor (media-fetch -> mediaId -> prompt) no instante em
-            // que a pagina busca a midia para montar o blob. Se o mediaId nao
-            // chegar, o background cancela SEM re-baixar e o tile e retentado.
+            const rotulo = (tile.getAttribute("aria-label") || "").trim();
+            if (!rotulo) continue;
+            if (_tilesBaixados.has(rotulo) || _tilesDesistidos.has(rotulo)) continue;
+
+            // ---- Identidade ANTES do clique ----
+            // v3.9.0: a PR #24 clicava em todo tile pronto e deixava o nome
+            // para o interceptor. O interceptor nunca disparou, o background
+            // cancelava sem re-baixar, e o resultado foi zero arquivo no run
+            // inteiro. Agora: sem identidade, nao clica. Nao abre menu a toa,
+            // nao gasta a barreira, nao deixa overlay aberto por cima do envio.
+            let alvo = null;
+            let mediaId = null;
+            const exata = _identidadeExataDoTile(tile, rotulo);
+            if (exata) {
+                alvo = exata.prompt;
+                mediaId = exata.mediaId;
+                console.log('[Dotti Scanner] Match por titulo exato (API): #' + alvo.number);
+            } else {
+                alvo = _casarTileComPrompt(rotulo);
+            }
+
+            if (!alvo) {
+                // Sem identidade nao baixa e NAO desiste: o titulo da API pode
+                // chegar na proxima varredura. Como nao ha clique, isso nao
+                // trava nada — so nao produz arquivo ainda.
+                continue;
+            }
+
+            if (alvo.downloaded || (alvo.foundVideos || 0) >= (alvo.expectedVideos || 1)) {
+                _tilesBaixados.add(rotulo);
+                continue;
+            }
+
+            // A API/DOM confirmam que existe: conta como GERADO ja, mesmo que o
+            // download ainda nao tenha acontecido. Regra dela: so e "nao gerado"
+            // se deu erro na plataforma ou se ainda esta gerando.
+            if (!alvo.gerado) {
+                alvo.gerado = true;
+                notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: alvo.number } });
+            }
+
+            const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
+
             try {
                 await chrome.runtime.sendMessage({
-                    action: 'EXPECT_DOWNLOAD', placeholder: true, folder: _downloadFolder
+                    action: 'EXPECT_DOWNLOAD',
+                    filename: nome,
+                    folder: _downloadFolder,
+                    promptNumber: alvo.number,
+                    mediaId: mediaId
                 });
             } catch (e) {
                 console.warn('[Dotti Scanner] EXPECT_DOWNLOAD falhou:', e.message);
                 continue;
             }
 
-            // Barreira: espera o background responder (ou 15s) antes do proximo.
+            // Janela de diagnostico: registra as URLs que a pagina busca ao
+            // montar o blob. E assim que descobrimos a rota real, em vez de
+            // adivinhar mais uma vez.
+            try {
+                document.dispatchEvent(new CustomEvent('dotti-log-urls', { detail: { ms: 8000 } }));
+            } catch (e) { }
+
+            // Barreira: espera o background responder (ou 8s) antes do proximo.
             const esperaResultado = new Promise((resolve) => {
                 _downloadAtual = { rotulo: rotulo, resolve: resolve };
                 setTimeout(() => {
@@ -3735,26 +3929,61 @@
                         _downloadAtual = null;
                         resolve({ ok: false, timeout: true });
                     }
-                }, 15000);
+                }, _ESPERA_DOWNLOAD_MS);
             });
 
-            console.log('[Dotti Scanner] Clicando download do tile:', rotulo.substring(0, 45));
+            console.log('[Dotti Scanner] Baixando tile -> #' + alvo.number + ' ' + nome);
             const clicou = await baixarTilePeloMenu(tile);
             if (!clicou) {
                 _downloadAtual = null;
+                _registrarFalhaDeTile(rotulo, 'menu nao abriu');
                 await sleep(800);
                 continue;
             }
 
             const res = await esperaResultado;
-            if (res.ok) {
+            if (res && res.ok) {
                 _tilesBaixados.add(rotulo);
+                _tilesTentativas.delete(rotulo);
+                _falhasSeguidas = 0;
             } else {
-                console.log('[Dotti Scanner] Tile sem identidade/timeout — fica para retentar:',
-                    rotulo.substring(0, 45));
+                _registrarFalhaDeTile(rotulo, res && res.timeout ? 'timeout' : 'sem arquivo');
             }
             await sleep(800); // respiro entre downloads
         }
+    }
+
+    // Teto por tile + disjuntor global. Nenhum tile pode ser reclicado para
+    // sempre, e um download quebrado tem que falhar barulhento, nao travar.
+    function _registrarFalhaDeTile(rotulo, motivo) {
+        const n = (_tilesTentativas.get(rotulo) || 0) + 1;
+        _tilesTentativas.set(rotulo, n);
+        _falhasSeguidas++;
+
+        if (n >= _MAX_TENTATIVAS_TILE) {
+            _tilesDesistidos.add(rotulo);
+            console.warn('[Dotti Scanner] Tile de escanteio apos ' + n +
+                ' tentativas (' + motivo + '):', rotulo.substring(0, 45));
+        } else {
+            console.log('[Dotti Scanner] Falha ' + n + '/' + _MAX_TENTATIVAS_TILE +
+                ' (' + motivo + '), vou retentar:', rotulo.substring(0, 45));
+        }
+
+        if (_falhasSeguidas >= _MAX_FALHAS_SEGUIDAS && !_downloadSuspenso) {
+            _downloadSuspenso = true;
+            console.error('[Dotti Scanner] DOWNLOAD QUEBRADO — ' + _falhasSeguidas +
+                ' falhas seguidas. Parando de clicar para nao travar a execucao. ' +
+                'Volto a tentar quando chegar um COMPLETED novo da API.');
+        }
+    }
+
+    // Um COMPLETED novo significa que algo mudou: vale tentar de novo.
+    function _religarDownload() {
+        if (_downloadSuspenso) {
+            console.log('[Dotti Scanner] COMPLETED novo — religando o download');
+            _downloadSuspenso = false;
+        }
+        _falhasSeguidas = 0;
     }
 
     async function _processDownloadQueue(downloads) {
@@ -5278,7 +5507,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.2.0 ready (injecao auto-regenerativa ativa)");
+        console.log("[Lets Automate] v3.9.0 ready (identidade por titulo da API + guardas anti-travamento)");
     }
 
     if (document.readyState === "loading") {
