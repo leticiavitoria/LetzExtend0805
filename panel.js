@@ -275,6 +275,10 @@ function setupMessageListener() {
                     (data.geradosSemDownload || []).join(", ") || "(nenhum)");
                 console.log("[Panel] RESUMO — nao gerados:",
                     (data.naoGerados || []).join(", ") || "(nenhum)");
+                if (data.tilesSemIdentidade) {
+                    console.log("[Panel] RESUMO —", data.tilesSemIdentidade,
+                        "tile(s) prontos sem identificacao (o video existe no Flow)");
+                }
                 break;
 
             // v3.0.0: Content.js baixou video direto (estilo DarkPlanner)

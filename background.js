@@ -2576,6 +2576,10 @@ let _extendOurDownloadIds = new Set(); // IDs criados por nos (skip para evitar 
 let _nomeExatoPendente = null; // { fullName, promptNumber, mediaId, at }
 
 function _installExtendDownloadListener(pending) {
+    // v3.9.2: carimba a hora de entrada na fila. O nome exato vindo do
+    // interceptor so vale se tiver sido registrado DEPOIS deste enfileiramento —
+    // senao um nome de um download anterior poderia batizar este blob.
+    pending.queuedAt = Date.now();
     _extendDownloadQueue.push(pending);
     // v3.9.0: o rotulo '[Extend]' e so porque o listener e compartilhado; a
     // aba Video usa a mesma fila. Antes isso imprimia "SCENE undefined" para
@@ -2616,8 +2620,17 @@ function _installExtendDownloadListener(pending) {
             // prioridade absoluta. Valido por 30s a partir do media-fetch.
             let exato = null;
             if (_nomeExatoPendente && (Date.now() - _nomeExatoPendente.at) < 30000) {
-                exato = _nomeExatoPendente;
-                _nomeExatoPendente = null;
+                // Tem que ser posterior ao enfileiramento deste download. Um
+                // nome exato mais VELHO pertence a outro video — usa-lo seria
+                // exatamente o erro de nomeacao que nao pode acontecer.
+                if (!next.queuedAt || _nomeExatoPendente.at >= next.queuedAt) {
+                    exato = _nomeExatoPendente;
+                    _nomeExatoPendente = null;
+                } else {
+                    console.warn('[Download] nome exato descartado por ser anterior ' +
+                        'a este download (evita nome errado):', _nomeExatoPendente.fullName);
+                    _nomeExatoPendente = null;
+                }
             }
             const _responder = async (ok, nomeFinal) => {
                 try {
