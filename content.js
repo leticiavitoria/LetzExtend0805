@@ -1270,6 +1270,9 @@
     // pagina renderiza o tile. Se enviados == as29s recebidos, ele e autonomo;
     // se faltar, a dependencia do DOM voltou pela porta dos fundos e e o
     // ADENDO 15 de novo, com outra roupa.
+    const _uuidsObservados = new Map();     // promptNumber -> uuid[] vistos no YhhmEf
+    const _orfaosPedidos = new Set();       // ja pedimos as29s por conta propria
+    const _ESPERA_ORFAO_MS = 90000;         // 90s sem as29s = pedir nos mesmos
     const _promptsBloqueados = new Set();   // conflito de identidade, nao erro do Flow
     const _enviadosNaExecucao = new Set();
     const _as29sRecebidos = new Set();
@@ -1359,6 +1362,7 @@
     const _filaDownload = [];          // [{ mediaId, promptNumber, tentativas }]
     const _downloadEmVoo = new Set();  // promptNumber
     let _bombeandoFila = false;
+    let _ultimaUrlTentada = null;
     const _MAX_TENTATIVAS_DOWNLOAD = 3;
     const _urlAssinadaPorId = new Map();   // mediaId -> { url, at }
 
@@ -1405,7 +1409,11 @@
 
                 _downloadEmVoo.add(item.promptNumber);
                 try {
+                    // Cada tentativa pede uma URL NOVA (o _pedirUrlAssinada
+                    // sempre dispara o as29s de novo): repetir a mesma URL
+                    // assinada tres vezes nao teria como dar certo.
                     const url = await _pedirUrlAssinada(item.mediaId);
+                    _ultimaUrlTentada = url || null;
                     if (!url) throw new Error('sem URL assinada');
 
                     const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
@@ -1431,6 +1439,18 @@
                     item.tentativas++;
                     console.warn('[Dotti] download #' + item.promptNumber + ' falhou (' +
                         item.tentativas + '/' + _MAX_TENTATIVAS_DOWNLOAD + '): ' + e.message);
+
+                    // v4.2.0: o downloads API so diz SERVER_FORBIDDEN. A sonda
+                    // pergunta da pagina e loga o status HTTP de verdade, para
+                    // a proxima falha nao virar adivinhacao.
+                    if (_ultimaUrlTentada) {
+                        try {
+                            document.dispatchEvent(new CustomEvent('dotti-sondar-url', {
+                                detail: { url: _ultimaUrlTentada }
+                            }));
+                        } catch (e2) { }
+                    }
+
                     if (item.tentativas < _MAX_TENTATIVAS_DOWNLOAD) {
                         _filaDownload.push(item);   // vai para o fim da fila
                         await sleep(3000);
@@ -1483,6 +1503,10 @@
             const d = e.detail || {};
             if (d.promptNumber) _enviadosNaExecucao.add(d.promptNumber);
             if (!d.uuids || !d.uuids.length) return;
+            // v4.2.0: guardamos os uuid so para PEDIR a URL quando o as29s nao
+            // vier sozinho (os 4 orfaos do log dela). Quem nomeia continua
+            // sendo o as29s: aqui nao se amarra identidade nenhuma.
+            if (d.promptNumber) _uuidsObservados.set(d.promptNumber, d.uuids.slice(0, 6));
             if (d.uuids.length !== 1) {
                 console.log('[Dotti] envio #' + (d.promptNumber || '?') + ': ' +
                     d.uuids.length + ' midia(s) na resposta — observacao, nao amarro');
@@ -2569,6 +2593,8 @@
         _promptComUuid.clear();
         _uuidsVistos.clear();
         _poolAmbiguo.length = 0;
+        _uuidsObservados.clear();
+        _orfaosPedidos.clear();
         _enviadosNaExecucao.clear();
         _as29sRecebidos.clear();
         _promptsBloqueados.clear();
@@ -3174,6 +3200,35 @@
             if (_stopRequested) {
                 console.log('[Dotti] Main loop: _stopRequested=true, saindo');
                 break;
+            }
+
+            // v4.2.0 — as29s ORFAO. No log dela: enviados=51, as29s recebidos=47.
+            // Quatro prompts nunca receberam as29s, provavelmente porque a
+            // pagina so pede a URL quando renderiza o tile. Passado um tempo,
+            // pedimos nos mesmos, usando os uuid que o YhhmEf observou. A
+            // identidade continua vindo do as29s (a resposta traz o PROMPT).
+            {
+                const agora2 = Date.now();
+                for (const t of _promptList) {
+                    if (!t.startedAt || t.downloaded) continue;
+                    if (_orfaosPedidos.has(t.number)) continue;
+                    if (agora2 - t.startedAt < _ESPERA_ORFAO_MS) continue;
+                    if (_promptComUuid.has(t.number)) continue;   // ja tem as29s
+                    const cands = _uuidsObservados.get(t.number);
+                    if (!cands || !cands.length) continue;
+
+                    _orfaosPedidos.add(t.number);
+                    console.log('[Dotti] #' + t.number + ' sem as29s ha ' +
+                        Math.round((agora2 - t.startedAt) / 1000) + 's — pedindo a URL eu mesmo (' +
+                        cands.length + ' candidato(s))');
+                    for (const uid of cands) {
+                        try {
+                            document.dispatchEvent(new CustomEvent('dotti-pedir-url', {
+                                detail: { mediaId: uid }
+                            }));
+                        } catch (e) { }
+                    }
+                }
             }
 
             // v4.0.0 (Ajuste 3 dela) — TETO DE TEMPO NO SLOT.
@@ -6230,7 +6285,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.1.0 ready (as29s como fonte unica; extracao por RPC)");
+        console.log("[Lets Automate] v4.2.0 ready (URL assinada completa; sonda HTTP; as29s orfao)");
     }
 
     if (document.readyState === "loading") {
