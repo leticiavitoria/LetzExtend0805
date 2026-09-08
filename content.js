@@ -2170,8 +2170,11 @@
         _tilesBaixados.clear();
         _tilesTentativas.clear();
         _tilesDesistidos.clear();
+        _promptsEmDownload.clear();
         _falhasSeguidas = 0;
         _downloadSuspenso = false;
+        _gradeScrollEl = null;
+        _avisouSemScroller = false;
     }
 
     // setPromptList — com campos identicos ao taskList do DarkPlanner
@@ -3250,45 +3253,101 @@
     }
 
     // ============================================
-    // scrollToRevealMore — scroll agressivo para react-virtuoso (mini window)
-    // Varre TODAS as posicoes do scroll para revelar itens virtualizados
-    // Retorna ao final para que o proximo scan cubra do final para o inicio
+    // scrollToRevealMore — rolagem da grade, VERIFICADA
     // ============================================
+    // v3.9.1: a versao anterior escrevia scrollTop e nunca conferia se mexeu.
+    // No log dela isso ficou evidente: o scanner rodava a cada 5s e reportava
+    // SEMPRE o mesmo tile ("Blizzard halts Antarctic station"), passada apos
+    // passada, por 60 loops — a janela renderizada nao mudava. Sem rolagem os
+    // videos novos nunca eram vistos, os prompts nunca fechavam, os 7 slots
+    // ficavam ocupados e a extensao parava de gerar TAMBEM. So voltava quando
+    // ela rolava a tela na mao.
+    //
+    // Agora: escreve, le de volta, e se nao mexeu descarta o candidato e tenta
+    // o proximo. E nunca sai calada.
+    let _gradeScrollEl = null;
+    let _avisouSemScroller = false;
+
+    // Todos os candidatos a container rolavel, do mais provavel ao ultimo
+    // recurso. document.scrollingElement entra na lista porque, se quem rola e
+    // a propria pagina, nenhuma busca por elemento alcancava isso antes.
+    function _candidatosDeScroll() {
+        const out = [];
+        document.querySelectorAll('cdk-virtual-scroll-viewport').forEach(el => out.push(el));
+        document.querySelectorAll('*').forEach(el => {
+            if (el.clientHeight > 200 && el.scrollHeight > el.clientHeight * 1.3) out.push(el);
+        });
+        if (document.scrollingElement) out.push(document.scrollingElement);
+        return out.filter((el, i) => out.indexOf(el) === i);
+    }
+
+    function _descreverEl(el) {
+        if (!el) return '(nenhum)';
+        if (el === document.scrollingElement) return 'document';
+        const cls = (el.getAttribute && el.getAttribute('class') || '').split(/\s+/)[0];
+        return el.tagName.toLowerCase() + (cls ? '.' + cls : '');
+    }
+
+    // Escreve e confere. Devolve true se o scrollTop realmente mudou.
+    function _tentarRolar(el, alvo) {
+        if (!el) return false;
+        const antes = el.scrollTop;
+        el.scrollTop = alvo;
+        if (Math.abs(el.scrollTop - antes) > 1) return true;
+
+        // Viewport do CDK as vezes ignora escrita direta; uma roda de mouse
+        // real passa pelo mesmo caminho de um usuario rolando.
+        try {
+            el.dispatchEvent(new WheelEvent('wheel', {
+                deltaY: alvo - antes, bubbles: true, cancelable: true
+            }));
+        } catch (e) { }
+        return Math.abs(el.scrollTop - antes) > 1;
+    }
+
     function scrollToRevealMore() {
-        // v3.5.0: no DOM Angular o container rolavel da grade e
-        // <cdk-virtual-scroll-viewport> — um custom element, NAO um <div>.
-        // A busca antiga varria so 'div', nunca o encontrava, e a funcao saia
-        // sem rolar nada. Por isso videos que ficavam prontos depois de sair da
-        // janela virtual nunca eram vistos: a virtualizacao mantem so ~7 tiles
-        // no DOM, e a grade nunca era percorrida.
-        let scrollEl = document.querySelector('cdk-virtual-scroll-viewport');
+        const tentar = (el) => {
+            if (!el || el.scrollHeight <= el.clientHeight) return false;
 
-        if (!scrollEl || scrollEl.scrollHeight <= scrollEl.clientHeight) {
-            // Fallback generico — agora sobre '*', nao so 'div', pra nao
-            // repetir o mesmo erro com outro custom element no futuro.
-            let maxRatio = 1;
-            let melhor = null;
-            document.querySelectorAll('*').forEach(el => {
-                if (el.clientHeight > 50 && el.scrollHeight > el.clientHeight * 1.3) {
-                    const ratio = el.scrollHeight / el.clientHeight;
-                    if (ratio > maxRatio) {
-                        maxRatio = ratio;
-                        melhor = el;
-                    }
-                }
-            });
-            scrollEl = melhor;
+            // Varre de CIMA para baixo, uma pagina por passada: os videos novos
+            // entram no topo da grade, que e justamente onde estao os que ainda
+            // faltam baixar. O salto de duas paginas de antes podia pular a
+            // faixa inteira onde o tile novo estava.
+            // Base = a posicao REAL do elemento, nao uma variavel nossa. Se a
+            // busca recomecar (ou se ela rolar na mao), a varredura continua de
+            // onde a tela esta, em vez de reiniciar do zero e ficar pulando
+            // entre as duas primeiras paginas para sempre.
+            const pagina = Math.max(200, el.clientHeight);
+            let alvo = el.scrollTop + pagina;
+            if (alvo >= el.scrollHeight - el.clientHeight) alvo = 0; // volta ao topo
+
+            if (!_tentarRolar(el, alvo)) return false;
+            _scannerScrollPosition = el.scrollTop;
+            return true;
+        };
+
+        if (_gradeScrollEl && document.contains(_gradeScrollEl) && tentar(_gradeScrollEl)) return;
+
+        // O cache falhou (ou nao existe): procurar de novo.
+        _gradeScrollEl = null;
+        _scannerScrollPosition = 0;
+        for (const el of _candidatosDeScroll()) {
+            if (tentar(el)) {
+                _gradeScrollEl = el;
+                _avisouSemScroller = false;
+                console.log('[Dotti Scroll] grade = ' + _descreverEl(el) +
+                    ' altura=' + el.scrollHeight + ' visivel=' + el.clientHeight);
+                return;
+            }
         }
 
-        if (!scrollEl || scrollEl.scrollHeight <= scrollEl.clientHeight) return;
-
-        // Scroll agressivo: avanca 2 paginas por scan para cobrir mais rapido
-        const pageHeight = scrollEl.clientHeight;
-        _scannerScrollPosition += pageHeight * 2;
-        if (_scannerScrollPosition >= scrollEl.scrollHeight) {
-            _scannerScrollPosition = 0; // Volta ao inicio para ciclo continuo
+        // Nunca sair calado: foi o silencio que escondeu essa falha ate agora.
+        if (!_avisouSemScroller) {
+            _avisouSemScroller = true;
+            console.warn('[Dotti Scroll] NENHUM container rolavel respondeu — ' +
+                'a grade nao vai ser percorrida sozinha. Candidatos testados: ' +
+                _candidatosDeScroll().length);
         }
-        scrollEl.scrollTop = _scannerScrollPosition;
     }
 
     // v3.1.0: getPromptAnchors — extrai palavras >5 chars para matching (identico DarkPlanner)
@@ -3645,6 +3704,10 @@
     // download DA CERTO; como nunca dava, o reclique era infinito.
     const _tilesTentativas = new Map();   // rotulo -> cliques que nao viraram arquivo
     const _tilesDesistidos = new Set();   // postos de escanteio ate o fim do run
+    // v3.9.1: prompts com download em voo. Sem isso o #161 foi baixado DUAS
+    // vezes no log dela: foundVideos so sobe quando o DOWNLOAD_RESULTADO volta,
+    // e a passada seguinte ainda via o prompt como pendente.
+    const _promptsEmDownload = new Set();
     const _MAX_TENTATIVAS_TILE = 3;
     const _ESPERA_DOWNLOAD_MS = 8000;     // era 15s: 6 tiles x 15s = loop de 90s
     // Disjuntor global: se o download esta quebrado (nada e criado), parar de
@@ -3891,6 +3954,9 @@
                 continue;
             }
 
+            // Ja tem um download deste prompt em voo: nao dispara outro.
+            if (_promptsEmDownload.has(alvo.number)) continue;
+
             // A API/DOM confirmam que existe: conta como GERADO ja, mesmo que o
             // download ainda nao tenha acontecido. Regra dela: so e "nao gerado"
             // se deu erro na plataforma ou se ainda esta gerando.
@@ -3933,15 +3999,18 @@
             });
 
             console.log('[Dotti Scanner] Baixando tile -> #' + alvo.number + ' ' + nome);
+            _promptsEmDownload.add(alvo.number);
             const clicou = await baixarTilePeloMenu(tile);
             if (!clicou) {
                 _downloadAtual = null;
+                _promptsEmDownload.delete(alvo.number);
                 _registrarFalhaDeTile(rotulo, 'menu nao abriu');
                 await sleep(800);
                 continue;
             }
 
             const res = await esperaResultado;
+            _promptsEmDownload.delete(alvo.number);
             if (res && res.ok) {
                 _tilesBaixados.add(rotulo);
                 _tilesTentativas.delete(rotulo);
@@ -5507,7 +5576,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.9.0 ready (identidade por titulo da API + guardas anti-travamento)");
+        console.log("[Lets Automate] v3.9.1 ready (rolagem verificada da grade)");
     }
 
     if (document.readyState === "loading") {
