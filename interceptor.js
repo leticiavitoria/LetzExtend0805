@@ -387,6 +387,29 @@
     } catch (e) { return ''; }
   }
 
+  // v4.1.0 — ARGUMENTOS POR RPC.
+  // O batchexecute empacota VARIOS RPCs numa requisicao so:
+  //   f.req = [[[rpc1, "<args1>", null, "generic"], [rpc2, "<args2>", ...]]]
+  // e a query lista todos em rpcids=a,b,c. A v4.0.0 lia os uuid do CORPO
+  // INTEIRO, entao pegava os argumentos de qualquer RPC que viajasse junto —
+  // inclusive a listagem do projeto. Era dai que saiam os "8 novos ao mesmo
+  // tempo" e os conflitos falsos recarimbando os mesmos mediaId.
+  function _dottiArgsDoRpc(corpoReq, rpcid) {
+    try {
+      var txt = String(corpoReq || '');
+      var m = txt.match(/(?:^|&)f\.req=([^&]*)/);
+      if (!m) return null;
+      var freq = JSON.parse(decodeURIComponent(m[1].replace(/\+/g, ' ')));
+      var achado = null;
+      (function visitar(no) {
+        if (achado !== null || !Array.isArray(no)) return;
+        if (no[0] === rpcid && typeof no[1] === 'string') { achado = no[1]; return; }
+        for (var i = 0; i < no.length; i++) visitar(no[i]);
+      })(freq);
+      return achado;
+    } catch (e) { return null; }
+  }
+
   function _dottiRpcIds(url) {
     try {
       var m = String(url || '').match(/[?&]rpcids=([^&]+)/);
@@ -457,55 +480,33 @@
     } catch (e) { return null; }
   }
 
+  // v4.1.0: jwpduf desligado para amarracao E para status. No log dela ele
+  // produzia "status desconhecido: 1" para toda midia e conflitos falsos,
+  // porque o estado era o primeiro numero 1-9 encontrado em qualquer lugar do
+  // payload e o PROMPT NNN vinha do payload inteiro (uma listagem traz o texto
+  // de TODOS os prompts). Nao se interpreta campo numerico sem saber de qual
+  // RPC veio e onde ele fica.
+  var _DOTTI_USAR_JWPDUF = false;
+
   function _dottiProcessarRpc(url, corpoReq, textoResp) {
     var ids = _dottiRpcIds(url);
     if (!ids.length) return;
     _dottiGuardarAt(corpoReq);
 
     var blocos = _dottiBlocosDaResposta(textoResp);
-    var reqTexto = decodeURIComponent(String(corpoReq || '').replace(/\+/g, ' '));
 
-    // ---- ENVIO ----
-    if (ids.indexOf('YhhmEf') !== -1) {
-      var mNum = reqTexto.match(_DOTTI_RE_PROMPT_NUM);
-      var payloads = _dottiPayloadsDoRpc(blocos, 'YhhmEf');
-      var uuids = _dottiUuidsDe(payloads.join(' '));
-      if (mNum && uuids.length) {
-        document.dispatchEvent(new CustomEvent('dotti-flow-envio', {
-          detail: {
-            promptNumber: Number(mNum[1]),
-            uuids: uuids,
-            promptText: reqTexto.substring(0, 400)
-          }
-        }));
-      }
-    }
-
-    // ---- STATUS ----
-    if (ids.indexOf('jwpduf') !== -1) {
-      var idsReq = _dottiUuidsDe(reqTexto);
-      var pl = _dottiPayloadsDoRpc(blocos, 'jwpduf');
-      var respTexto = pl.join(' ');
-      // Ajuste 1 dela: se o nosso texto vier na resposta, a amarracao sai desta
-      // mesma transacao — sem candidatos, sem lista negra.
-      var mNumResp = respTexto.match(_DOTTI_RE_PROMPT_NUM);
-      for (var i = 0; i < idsReq.length; i++) {
-        document.dispatchEvent(new CustomEvent('dotti-flow-status', {
-          detail: {
-            mediaId: idsReq[i],
-            estado: _dottiEstadoDoStatus(pl[0] || 'null'),
-            promptNumber: mNumResp ? Number(mNumResp[1]) : null
-          }
-        }));
-      }
-    }
-
-    // ---- URL ASSINADA ----
+    // ---- URL ASSINADA (as29s) — fonte unica de identidade e de "pronto" ----
+    // No log dela acerta 100%: mediaId no argumento, o MESMO mediaId no caminho
+    // da URL da resposta. Nao ha como errar.
     if (ids.indexOf('as29s') !== -1) {
-      var idsUrl = _dottiUuidsDe(reqTexto);
+      var argsUrl = _dottiArgsDoRpc(corpoReq, 'as29s');
+      var idsUrl = _dottiUuidsDe(argsUrl || '');
       var plUrl = _dottiPayloadsDoRpc(blocos, 'as29s').join(' ');
       var mVideo = plUrl.match(/https:\/\/flow-content\.google\/video\/[^"'\\\s]+/);
       var mNumUrl = plUrl.match(_DOTTI_RE_PROMPT_NUM);
+      console.log('[Dotti] rpc=as29s midias=' + idsUrl.length +
+        (mNumUrl ? ' prompt=#' + mNumUrl[1] : ' prompt=?') +
+        (mVideo ? ' url=sim' : ' url=nao'));
       if (mVideo) {
         document.dispatchEvent(new CustomEvent('dotti-flow-url', {
           detail: {
@@ -513,6 +514,38 @@
             url: mVideo[0],
             promptNumber: mNumUrl ? Number(mNumUrl[1]) : null
           }
+        }));
+      }
+    }
+
+    // ---- ENVIO (YhhmEf) — apenas OBSERVACAO por enquanto ----
+    // Com a extracao por RPC corrigida ele deve devolver UMA midia por envio.
+    // Enquanto o proximo log nao confirmar isso, ele nao amarra nada: voltar a
+    // confiar antes da confirmacao seria repetir o erro deste adendo.
+    if (ids.indexOf('YhhmEf') !== -1) {
+      var argsEnvio = _dottiArgsDoRpc(corpoReq, 'YhhmEf') || '';
+      var mNum = argsEnvio.match(_DOTTI_RE_PROMPT_NUM);
+      var uuidsEnvio = _dottiUuidsDe(_dottiPayloadsDoRpc(blocos, 'YhhmEf').join(' '));
+      console.log('[Dotti] rpc=YhhmEf midias=' + uuidsEnvio.length +
+        (mNum ? ' prompt=#' + mNum[1] : ' prompt=?') + ' (observacao)');
+      document.dispatchEvent(new CustomEvent('dotti-flow-envio', {
+        detail: {
+          promptNumber: mNum ? Number(mNum[1]) : null,
+          uuids: uuidsEnvio,
+          observacao: true
+        }
+      }));
+    }
+
+    // ---- STATUS (jwpduf) — desligado ----
+    if (_DOTTI_USAR_JWPDUF && ids.indexOf('jwpduf') !== -1) {
+      var argsSt = _dottiArgsDoRpc(corpoReq, 'jwpduf');
+      var idsReq = _dottiUuidsDe(argsSt || '');
+      var pl = _dottiPayloadsDoRpc(blocos, 'jwpduf');
+      console.log('[Dotti] rpc=jwpduf midias=' + idsReq.length);
+      for (var i = 0; i < idsReq.length; i++) {
+        document.dispatchEvent(new CustomEvent('dotti-flow-status', {
+          detail: { mediaId: idsReq[i], estado: _dottiEstadoDoStatus(pl[0] || 'null') }
         }));
       }
     }
@@ -578,7 +611,13 @@
   // v3.9.3: despeja os uuid encontrados numa resposta de RPC. Quem decide o que
   // fazer com eles e o content.js, que sabe qual prompt acabou de ser enviado.
   var _DOTTI_RE_UUID_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  // v4.1.0: resquicio da correlacao temporal do ADENDO 17. Desligado — era a
+  // origem das linhas "N novos ao mesmo tempo", que despejavam os uuid de
+  // QUALQUER resposta de batchexecute (listagem do projeto inclusive).
+  var _DOTTI_EMITIR_UUIDS_LEGADO = false;
+
   function _dottiEmitUuids(texto) {
+    if (!_DOTTI_EMITIR_UUIDS_LEGADO) return;
     try {
       var achados = String(texto || '').match(_DOTTI_RE_UUID_G);
       if (!achados || !achados.length) return;
@@ -727,5 +766,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v4.0.0 ativo (batchexecute)');
+  console.log('[DottiInterceptor] v4.1.0 ativo (as29s como fonte)');
 })();

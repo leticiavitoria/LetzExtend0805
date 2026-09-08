@@ -288,6 +288,13 @@ function setupMessageListener() {
                     (data.geradosSemDownload || []).join(", ") || "(nenhum)");
                 console.log("[Panel] RESUMO — nao gerados:",
                     (data.naoGerados || []).join(", ") || "(nenhum)");
+                console.log("[Panel] RESUMO — enviados=" + data.enviados +
+                    " · as29s recebidos=" + data.as29sRecebidos +
+                    " · baixados=" + data.baixados);
+                if (data.bloqueados && data.bloqueados.length) {
+                    console.warn("[Panel] RESUMO — bloqueados por conflito (o video existe):",
+                        data.bloqueados.join(", "));
+                }
                 if (data.tilesSemIdentidade) {
                     console.log("[Panel] RESUMO —", data.tilesSemIdentidade,
                         "tile(s) prontos sem identificacao (o video existe no Flow)");

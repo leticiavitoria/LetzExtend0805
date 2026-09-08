@@ -1266,6 +1266,13 @@
     const _uuidsPorPrompt = new Map();    // promptNumber -> Set(uuid)
     const _uuidListaNegra = new Set();    // aparece em 2 envios: projeto/sessao
     const _statusRecebidoEm = new Map();  // promptNumber -> timestamp do ultimo status
+    // v4.1.0 (pedido dela): medir se o as29s dispara sozinho ou so quando a
+    // pagina renderiza o tile. Se enviados == as29s recebidos, ele e autonomo;
+    // se faltar, a dependencia do DOM voltou pela porta dos fundos e e o
+    // ADENDO 15 de novo, com outra roupa.
+    const _promptsBloqueados = new Set();   // conflito de identidade, nao erro do Flow
+    const _enviadosNaExecucao = new Set();
+    const _as29sRecebidos = new Set();
     // Ajuste 3: teto por prompt SEM receber status. O timeout de task (5 min) e
     // da geracao; este e do slot, e por isso mais folgado.
     const _TETO_SEM_STATUS_MS = 600000;   // 10 min
@@ -1283,7 +1290,13 @@
             console.error('[Dotti] CONFLITO de identidade para ' + mediaId.substring(0, 12) +
                 ': ' + jaTem.via + ' diz #' + jaTem.promptNumber +
                 ', ' + via + ' diz #' + promptNumber + ' — NAO vou baixar este.');
+            // v4.1.0: o conflito e recuperavel. Com o as29s como fonte unica ele
+            // nao deveria acontecer; se acontecer, o prompt fica BLOQUEADO —
+            // nao "nao gerado" —, continua elegivel para download, e o resumo
+            // separa as duas coisas.
             jaTem.conflito = true;
+            _promptsBloqueados.add(jaTem.promptNumber);
+            _promptsBloqueados.add(promptNumber);
             return null;
         }
         if (jaTem) {
@@ -1463,51 +1476,51 @@
 
     function setupApiInterceptorListeners() {
         // ---- v4.0.0: identidade e ciclo de vida pela API ----
+        // v4.1.0: o envio vira OBSERVACAO. Ele so volta a amarrar quando um log
+        // confirmar que, com a extracao por RPC corrigida, ele entrega uma
+        // midia por envio. Ate la, quem manda e o as29s.
         document.addEventListener('dotti-flow-envio', (e) => {
             const d = e.detail || {};
-            if (!d.promptNumber || !d.uuids || !d.uuids.length) return;
-            _registrarCandidatosDoEnvio(d.promptNumber, d.uuids);
-            console.log('[Dotti] envio: #' + d.promptNumber + ' -> ' + d.uuids.length +
-                ' uuid candidato(s)');
+            if (d.promptNumber) _enviadosNaExecucao.add(d.promptNumber);
+            if (!d.uuids || !d.uuids.length) return;
+            if (d.uuids.length !== 1) {
+                console.log('[Dotti] envio #' + (d.promptNumber || '?') + ': ' +
+                    d.uuids.length + ' midia(s) na resposta — observacao, nao amarro');
+            }
         });
 
+        // v4.1.0: o jwpduf esta desligado no interceptor. Se voltar um dia, o
+        // ramo continua aqui — mas so age com estado que a captura conhece.
         document.addEventListener('dotti-flow-status', (e) => {
             const d = e.detail || {};
             if (!d.mediaId) return;
-            _statusRecebidoEm.set(d.mediaId, Date.now());
-
-            // Ajuste 1 dela: se o nosso texto veio na MESMA transacao, esta e a
-            // amarracao primaria — direta, sem candidatos.
-            if (d.promptNumber) _amarrarMedia(d.mediaId, d.promptNumber, 'jwpduf');
-
             const n = _promptDoMedia(d.mediaId);
-            if (!n) {
-                console.log('[Dotti] status de midia sem prompt conhecido: ' +
-                    String(d.mediaId).substring(0, 12) + ' (estado ' + d.estado + ')');
-                return;
-            }
+            if (!n) return;
             _statusRecebidoEm.set(n, Date.now());
-
-            if (d.estado === _ESTADO_GERANDO) return;
-
             if (d.estado === _ESTADO_PRONTO) {
                 _liberarSlotDoPrompt(n, 'status [3]', true);
                 _enfileirarDownload(d.mediaId, n);
-                return;
             }
-
-            // Ajuste 2 dela: estado que ninguem viu na captura. Nunca deixar
-            // cair no ramo "ainda gerando" — o slot ficaria preso para sempre.
-            console.warn('[Dotti] status desconhecido do jwpduf: ' + d.estado +
-                ' (mediaId ' + String(d.mediaId).substring(0, 12) + ', prompt #' + n +
-                ') — tratando como terminal');
-            _liberarSlotDoPrompt(n, 'status desconhecido ' + d.estado, false);
         });
 
+        // ---- as29s: identidade E sinal de pronto ----
+        // Se o Flow pediu a URL assinada daquela midia, o video esta pronto.
         document.addEventListener('dotti-flow-url', (e) => {
             const d = e.detail || {};
-            if (d.mediaId && d.url) _urlAssinadaPorId.set(d.mediaId, { url: d.url, at: Date.now() });
-            if (d.mediaId && d.promptNumber) _amarrarMedia(d.mediaId, d.promptNumber, 'as29s');
+            if (!d.mediaId) return;
+            _as29sRecebidos.add(d.mediaId);
+            if (d.url) _urlAssinadaPorId.set(d.mediaId, { url: d.url, at: Date.now() });
+            if (!d.promptNumber) {
+                console.log('[Dotti] as29s sem PROMPT no payload: ' +
+                    String(d.mediaId).substring(0, 12) + ' — nao da para amarrar');
+                return;
+            }
+            const reg = _amarrarMedia(d.mediaId, d.promptNumber, 'as29s');
+            if (!reg) return;   // conflito: nao baixa (nome errado e pior)
+
+            _statusRecebidoEm.set(d.promptNumber, Date.now());
+            _liberarSlotDoPrompt(d.promptNumber, 'as29s recebido', true);
+            _enfileirarDownload(d.mediaId, d.promptNumber);
         });
 
         // v3.9.3: uuid vindos das respostas de RPC (e do erro do Angular).
@@ -2556,6 +2569,14 @@
         _promptComUuid.clear();
         _uuidsVistos.clear();
         _poolAmbiguo.length = 0;
+        _enviadosNaExecucao.clear();
+        _as29sRecebidos.clear();
+        _promptsBloqueados.clear();
+        _idParaPrompt.clear();
+        _candidatosDoEnvio.clear();
+        _uuidsPorPrompt.clear();
+        _uuidListaNegra.clear();
+        _statusRecebidoEm.clear();
         _falhasSeguidas = 0;
         _downloadSuspenso = false;
         _gradeScrollEl = null;
@@ -3462,6 +3483,26 @@
                 '): ' + lista(geradosSemArquivo));
             console.log('[Dotti] RESUMO — enviados e nunca vistos prontos (' + nuncaVistos.length +
                 '): ' + lista(nuncaVistos));
+
+            // v4.1.0 (pedido dela): a linha que responde, sozinha, se o as29s
+            // depende do render da grade. Numeros batendo = ele dispara
+            // sozinho. Faltando = a dependencia do DOM voltou.
+            const baixados = _promptList.filter(t => t.downloaded).length;
+            console.log('[Dotti] RESUMO — enviados=' + _enviadosNaExecucao.size +
+                ' · as29s recebidos=' + _as29sRecebidos.size +
+                ' · baixados=' + baixados);
+            if (_enviadosNaExecucao.size > _as29sRecebidos.size) {
+                console.warn('[Dotti] RESUMO — faltaram ' +
+                    (_enviadosNaExecucao.size - _as29sRecebidos.size) +
+                    ' as29s. Se isso se repetir, o as29s depende do render da ' +
+                    'grade e precisamos pedir a URL nos mesmos.');
+            }
+            if (_promptsBloqueados.size) {
+                console.warn('[Dotti] RESUMO — ' + _promptsBloqueados.size +
+                    ' prompt(s) BLOQUEADOS por conflito de identidade (nao e ' +
+                    '"nao gerado"; o video existe e segue elegivel): ' +
+                    Array.from(_promptsBloqueados).join(', '));
+            }
             if (_tilesDesistidos.size) {
                 console.log('[Dotti] RESUMO — ' + _tilesDesistidos.size +
                     ' tile(s) postos de escanteio apos ' + _MAX_TENTATIVAS_TILE + ' tentativas');
@@ -3482,7 +3523,11 @@
                     geradosSemDownload: geradosSemArquivo,
                     naoGerados: nuncaVistos,
                     tilesDesistidos: _tilesDesistidos.size,
-                    tilesSemIdentidade: _tilesSemIdentidade.size
+                    tilesSemIdentidade: _tilesSemIdentidade.size,
+                    enviados: _enviadosNaExecucao.size,
+                    as29sRecebidos: _as29sRecebidos.size,
+                    baixados: _promptList.filter(t => t.downloaded).length,
+                    bloqueados: Array.from(_promptsBloqueados)
                 }
             });
         }
@@ -6185,7 +6230,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.0.0 ready (identidade pela API do Flow: batchexecute)");
+        console.log("[Lets Automate] v4.1.0 ready (as29s como fonte unica; extracao por RPC)");
     }
 
     if (document.readyState === "loading") {
