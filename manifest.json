@@ -14,11 +14,13 @@
     "tabs",
     "system.display",
     "contentSettings",
-    "debugger"
+    "debugger",
+    "webRequest"
   ],
 
   "host_permissions": [
     "https://flow.google.com/*",
+    "https://flow-content.google/*",
     "https://labs.google/*",
     "https://*.googleapis.com/*",
     "https://*.googleusercontent.com/*",

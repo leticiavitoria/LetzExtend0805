@@ -4457,6 +4457,35 @@
                 })();
                 return true;
 
+            // v3.6.0: o background capturou o mediaId no redirect e pergunta
+            // de qual prompt e. _mediaTracker ja guarda mediaId -> promptNumber,
+            // montado no envio a partir do texto que NOS mandamos — nao da
+            // parafrase que o Flow poe no titulo do tile. Identidade exata,
+            // sem score e sem depender de reconhecer o tile antes de clicar.
+            case "RESOLVE_MEDIA_NAME": {
+                const mid = message.mediaId;
+                const track = mid ? _mediaTracker.get(mid) : null;
+                if (!track || !track.promptNumber) {
+                    console.log('[Dotti] mediaId sem prompt conhecido:',
+                        String(mid).substring(0, 12));
+                    sendResponse({ success: false });
+                    break;
+                }
+                const alvo = _promptList.find(p => p.number === track.promptNumber);
+                if (!alvo) { sendResponse({ success: false }); break; }
+
+                const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
+                console.log('[Dotti] mediaId ' + String(mid).substring(0, 12) +
+                    ' -> prompt #' + alvo.number + ' -> ' + nome);
+                sendResponse({
+                    success: true,
+                    filename: nome,
+                    folder: _downloadFolder,
+                    promptNumber: alvo.number
+                });
+                break;
+            }
+
             // v3.0.0: STOP_AUTOMATION — para processamento
             case "STOP_AUTOMATION":
                 _stopRequested = true;
