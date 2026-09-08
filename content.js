@@ -1153,6 +1153,47 @@
 
     const _idsDesconhecidos = new Set();
 
+    // ============================================
+    // v3.9.3 — tabela uuid -> prompt, montada por NOS
+    // ============================================
+    // O _mediaTracker depende do interceptor pegar a resposta do envio. O Flow
+    // migrou para batchexecute (RPC do Angular) e aquela captura morreu: no log
+    // dela a linha "[Dotti] API: video-submitted" nao aparece uma unica vez, e
+    // por isso TODO media-fetch caia em "id sem prompt conhecido".
+    //
+    // O uuid continua observavel: aparece na resposta do RPC (e no erro
+    // "pe`<uuid>" do Angular) logo depois do envio, e e o mesmo que a URL do
+    // download carrega. Entao amarramos aqui, no envio.
+    const _uuidParaPrompt = new Map();
+    const _promptComUuid = new Map();   // promptNumber -> uuid (um por envio)
+    const _uuidsVistos = new Set();
+    const _JANELA_UUID_MS = 60000;
+
+    function _registrarUuidsDoEnvio(uuids) {
+        // So os que nunca vimos: os antigos sao das midias ja existentes.
+        const novos = (uuids || []).filter(u => !_uuidsVistos.has(u));
+        for (const u of (uuids || [])) _uuidsVistos.add(u);
+        if (!novos.length) return;
+
+        const n = _lastSubmittedPromptNumber;
+        if (!n) return;
+        if (Date.now() - (_lastSubmittedTime || 0) > _JANELA_UUID_MS) return;
+        if (_promptComUuid.has(n)) return;   // este prompt ja tem o seu
+
+        // Regra estrita: com mais de um uuid novo nao da para saber qual e o
+        // do prompt recem-enviado. Nomear errado e pior do que nao baixar,
+        // entao neste caso simplesmente nao amarra.
+        if (novos.length !== 1) {
+            console.log('[Dotti] uuid do envio: ' + novos.length +
+                ' novos ao mesmo tempo — ambiguo, nao vou amarrar (#' + n + ')');
+            return;
+        }
+
+        _uuidParaPrompt.set(novos[0], n);
+        _promptComUuid.set(n, novos[0]);
+        console.log('[Dotti] uuid do envio: #' + n + ' -> ' + novos[0].substring(0, 12));
+    }
+
     // v3.9.2: rotulo do tile -> numero do prompt, aprendido pelo mediaId da URL
     // do download. Identidade exata, sobrevive as passadas seguintes.
     const _rotuloParaPrompt = new Map();
@@ -1172,6 +1213,12 @@
     }
 
     function setupApiInterceptorListeners() {
+        // v3.9.3: uuid vindos das respostas de RPC (e do erro do Angular).
+        document.addEventListener('dotti-uuids', (e) => {
+            const uuids = e.detail && e.detail.uuids;
+            if (uuids && uuids.length) _registrarUuidsDoEnvio(uuids);
+        });
+
         // Video submitted -> popular _mediaTracker (identico DarkPlanner)
         // v3.8.0: a pagina esta buscando uma midia PELO ID — e o video que vai
         // virar blob e ser baixado em seguida. _mediaTracker (montado no envio
@@ -1180,7 +1227,13 @@
         document.addEventListener('dotti-media-fetch', (e) => {
             const mediaId = e.detail && e.detail.mediaId;
             if (!mediaId) return;
-            const track = _acharNoTracker(mediaId);
+            // v3.9.3: primeiro a nossa tabela (montada no envio); o
+            // _mediaTracker da API fica como segunda opcao, para o caso de o
+            // Flow voltar a responder pelos endpoints antigos.
+            let track = null;
+            const nossoPrompt = _uuidParaPrompt.get(String(mediaId).toLowerCase());
+            if (nossoPrompt) track = { promptNumber: nossoPrompt };
+            if (!track) track = _acharNoTracker(mediaId);
             if (!track || !track.promptNumber) {
                 // v3.9.0: o filtro do interceptor ficou amplo de proposito, entao
                 // id desconhecido e normal. Loga uma vez por id para nao poluir.
@@ -1335,7 +1388,7 @@
                         if (update.title && !tracked.title) tracked.title = update.title;
                         if (update.thumbUrl && !tracked.thumbUrl) tracked.thumbUrl = update.thumbUrl;
 
-                        if (update.status === 'COMPLETED') _religarDownload();
+                        if (update.status === 'COMPLETED') _religarDownload('COMPLETED da API');
 
                         if (update.status === 'COMPLETED' && tracked.promptNumber) {
                             const prompt = _promptList.find(p => p.number === tracked.promptNumber);
@@ -2202,6 +2255,9 @@
         _tilesDesistidos.clear();
         _promptsEmDownload.clear();
         _tilesSemIdentidade.clear();
+        _uuidParaPrompt.clear();
+        _promptComUuid.clear();
+        _uuidsVistos.clear();
         _falhasSeguidas = 0;
         _downloadSuspenso = false;
         _gradeScrollEl = null;
@@ -3314,12 +3370,33 @@
     // recurso. document.scrollingElement entra na lista porque, se quem rola e
     // a propria pagina, nenhuma busca por elemento alcancava isso antes.
     function _candidatosDeScroll() {
-        const out = [];
-        document.querySelectorAll('cdk-virtual-scroll-viewport').forEach(el => out.push(el));
-        document.querySelectorAll('*').forEach(el => {
-            if (el.clientHeight > 200 && el.scrollHeight > el.clientHeight * 1.3) out.push(el);
+        const rolavel = (el) => el && el.clientHeight > 0 &&
+            el.scrollHeight > el.clientHeight * 1.3;
+
+        // v3.9.3: PRIMEIRO os containers que realmente contem os tiles. Antes
+        // valia qualquer elemento rolavel e o primeiro a responder vencia — no
+        // log dela isso elegeu "flow-soupy-overlay altura=573", um overlay, e a
+        // grade nunca era percorrida ("rola, mas nao passa por cima dos
+        // videos"). Quem contem tile e a grade, por definicao.
+        const comTiles = [];
+        document.querySelectorAll('flow-grid-tile-container').forEach(tile => {
+            for (let el = tile.parentElement; el; el = el.parentElement) {
+                if (rolavel(el) && comTiles.indexOf(el) === -1) comTiles.push(el);
+            }
         });
-        if (document.scrollingElement) out.push(document.scrollingElement);
+
+        const resto = [];
+        document.querySelectorAll('cdk-virtual-scroll-viewport').forEach(el => {
+            if (rolavel(el)) resto.push(el);
+        });
+        // Sem tiles na tela, exigir altura de gente grande: e o que descarta
+        // overlays e paineis pequenos.
+        document.querySelectorAll('*').forEach(el => {
+            if (el.clientHeight > 600 && rolavel(el)) resto.push(el);
+        });
+        if (document.scrollingElement) resto.push(document.scrollingElement);
+
+        const out = comTiles.concat(resto);
         return out.filter((el, i) => out.indexOf(el) === i);
     }
 
@@ -3760,6 +3837,8 @@
     let _falhasSeguidas = 0;
     const _MAX_FALHAS_SEGUIDAS = 5;
     let _downloadSuspenso = false;
+    let _suspensoDesde = 0;
+    const _RE_ARMAR_MS = 120000;   // 2 min: pausa, nao desistencia
 
     let _avisouAutoDownloadOff = false;
 
@@ -3969,7 +4048,7 @@
         // Envio tem prioridade: mexer no menu agora quebraria o switchMode.
         if (_enviandoAgora) return;
 
-        if (_downloadSuspenso) return;
+        if (_disjuntorAtivo()) return;
 
         const tiles = _tilesProntos();
         if (!tiles.length) {
@@ -3982,7 +4061,7 @@
         for (const tile of tiles) {
             if (_stopRequested || !_scannerActive) return;
             if (_enviandoAgora) return;   // chegou prompt para enviar: sai na hora
-            if (_downloadSuspenso) return;
+            if (_disjuntorAtivo()) return;
 
             const rotulo = (tile.getAttribute("aria-label") || "").trim();
             if (!rotulo) continue;
@@ -4083,7 +4162,7 @@
             if (!clicou) {
                 _downloadAtual = null;
                 if (alvo) _promptsEmDownload.delete(alvo.number);
-                _registrarFalhaDeTile(rotulo, 'menu nao abriu');
+                _registrarFalhaDeTile(rotulo, 'menu nao abriu', !alvo);
                 await sleep(800);
                 continue;
             }
@@ -4093,10 +4172,12 @@
             if (res && res.ok) {
                 _tilesBaixados.add(rotulo);
                 _tilesSemIdentidade.delete(rotulo);
+                _religarDownload('download bem-sucedido');
                 _tilesTentativas.delete(rotulo);
                 _falhasSeguidas = 0;
             } else {
-                _registrarFalhaDeTile(rotulo, res && res.timeout ? 'timeout' : 'sem arquivo');
+                _registrarFalhaDeTile(rotulo,
+                    res && res.timeout ? 'timeout' : 'sem arquivo', !alvo);
             }
             await sleep(800); // respiro entre downloads
         }
@@ -4104,10 +4185,15 @@
 
     // Teto por tile + disjuntor global. Nenhum tile pode ser reclicado para
     // sempre, e um download quebrado tem que falhar barulhento, nao travar.
-    function _registrarFalhaDeTile(rotulo, motivo) {
+    function _registrarFalhaDeTile(rotulo, motivo, semIdentidade) {
         const n = (_tilesTentativas.get(rotulo) || 0) + 1;
         _tilesTentativas.set(rotulo, n);
-        _falhasSeguidas++;
+
+        // v3.9.3: falha por FALTA DE IDENTIDADE nao conta para o disjuntor.
+        // No log dela as 5 falhas que desarmaram o disjuntor eram todas assim —
+        // causa conhecida, nao download quebrado. O disjuntor puniu o sintoma
+        // errado e a execucao ficou 180 loops sem baixar nada.
+        if (!semIdentidade) _falhasSeguidas++;
 
         if (n >= _MAX_TENTATIVAS_TILE) {
             _tilesDesistidos.add(rotulo);
@@ -4120,19 +4206,34 @@
 
         if (_falhasSeguidas >= _MAX_FALHAS_SEGUIDAS && !_downloadSuspenso) {
             _downloadSuspenso = true;
+            _suspensoDesde = Date.now();
             console.error('[Dotti Scanner] DOWNLOAD QUEBRADO — ' + _falhasSeguidas +
-                ' falhas seguidas. Parando de clicar para nao travar a execucao. ' +
-                'Volto a tentar quando chegar um COMPLETED novo da API.');
+                ' falhas seguidas. Pausando os cliques por ' +
+                (_RE_ARMAR_MS / 1000) + 's antes de tentar de novo.');
         }
     }
 
     // Um COMPLETED novo significa que algo mudou: vale tentar de novo.
-    function _religarDownload() {
+    function _religarDownload(motivo) {
         if (_downloadSuspenso) {
-            console.log('[Dotti Scanner] COMPLETED novo — religando o download');
+            console.log('[Dotti Scanner] religando o download (' + (motivo || 'sinal novo') + ')');
             _downloadSuspenso = false;
         }
         _falhasSeguidas = 0;
+        _suspensoDesde = 0;
+    }
+
+    // v3.9.3: o disjuntor NAO pode depender de um sinal que talvez nunca venha.
+    // Era esse o caso: ele so re-armava com um COMPLETED da API, e a captura da
+    // API esta morta desde que o Flow migrou para batchexecute. Agora ele volta
+    // sozinho depois de um tempo — pausa, nunca desistencia.
+    function _disjuntorAtivo() {
+        if (!_downloadSuspenso) return false;
+        if (_suspensoDesde && (Date.now() - _suspensoDesde) >= _RE_ARMAR_MS) {
+            _religarDownload('tempo de pausa cumprido');
+            return false;
+        }
+        return true;
     }
 
     async function _processDownloadQueue(downloads) {
@@ -5656,7 +5757,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v3.9.2 ready (identidade pelo mediaId da URL do download)");
+        console.log("[Lets Automate] v3.9.3 ready (uuid amarrado no envio; disjuntor que nao trava)");
     }
 
     if (document.readyState === "loading") {

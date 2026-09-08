@@ -331,6 +331,11 @@
       uploadImage: url.indexOf('/uploadImage') !== -1 && url.indexOf('uploadUserImage') === -1,
       videoSubmit: isVideoSubmit,
       videoStatus: isVideoStatus,
+      // v3.9.3: o Flow passou a enviar por batchexecute (RPC do Angular). Os
+      // endpoints REST antigos nao existem mais, entao o _mediaTracker ficava
+      // VAZIO e todo media-fetch caia em "id sem prompt conhecido". A resposta
+      // do batchexecute carrega o uuid da midia recem-criada.
+      rpc: url.indexOf('batchexecute') !== -1,
       imageGenerate: url.indexOf('batchGenerateImages') !== -1,
       imageUpscale: url.indexOf('upsampleImage') !== -1,
       // v3.8.0: quando a pagina busca a midia PELO ID (ao montar o blob do
@@ -369,6 +374,35 @@
     if (Date.now() > _dottiLogAte) return;
     console.log('[DottiInterceptor][URL]', String(url || '').substring(0, 160));
   }
+
+  // v3.9.3: despeja os uuid encontrados numa resposta de RPC. Quem decide o que
+  // fazer com eles e o content.js, que sabe qual prompt acabou de ser enviado.
+  var _DOTTI_RE_UUID_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  function _dottiEmitUuids(texto) {
+    try {
+      var achados = String(texto || '').match(_DOTTI_RE_UUID_G);
+      if (!achados || !achados.length) return;
+      var unicos = [];
+      for (var i = 0; i < achados.length; i++) {
+        var u = achados[i].toLowerCase();
+        if (unicos.indexOf(u) === -1) unicos.push(u);
+      }
+      document.dispatchEvent(new CustomEvent('dotti-uuids', {
+        detail: { uuids: unicos, timestamp: Date.now() }
+      }));
+    } catch (e) {}
+  }
+
+  // Segunda fonte, de graca: o Angular estoura "pe`<uuid>" logo apos o envio.
+  window.addEventListener('unhandledrejection', function (ev) {
+    try {
+      var msg = (ev && ev.reason && (ev.reason.message || String(ev.reason))) || '';
+      var m = String(msg).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      if (m) document.dispatchEvent(new CustomEvent('dotti-uuids', {
+        detail: { uuids: [m[0].toLowerCase()], timestamp: Date.now(), fonte: 'erro' }
+      }));
+    } catch (e) {}
+  });
 
   // v3.8.0: emite o mediaId da midia que a pagina esta buscando. Disparado
   // ANTES da resposta chegar, de proposito: o download em blob nasce depois
@@ -416,6 +450,7 @@
       processVideoSubmitResponse(this.responseText);
     });
     if (checks.videoStatus) this.addEventListener('load', function() { processVideoStatusResponse(this.responseText); });
+    if (checks.rpc) this.addEventListener('load', function() { _dottiEmitUuids(this.responseText); });
     if (checks.imageGenerate) this.addEventListener('load', function() {
       if (this.status >= 200 && this.status < 300) processImageGenerateResponse(this.responseText);
       else _DOTTI_DEBUG && console.log('[DottiInterceptor] batchGenerateImages HTTP', this.status);
@@ -460,6 +495,7 @@
       r.clone().text().then(processVideoSubmitResponse).catch(function(){});
     }).catch(function(){});
     if (checks.videoStatus) p.then(function(r) { r.clone().text().then(processVideoStatusResponse).catch(function(){}); }).catch(function(){});
+    if (checks.rpc) p.then(function(r) { r.clone().text().then(_dottiEmitUuids).catch(function(){}); }).catch(function(){});
     if (checks.imageGenerate) p.then(function(r) {
       if (r.ok) r.clone().text().then(processImageGenerateResponse).catch(function(){});
       else _DOTTI_DEBUG && console.log('[DottiInterceptor] batchGenerateImages HTTP', r.status);
@@ -471,5 +507,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v3.9.2 ativo');
+  console.log('[DottiInterceptor] v3.9.3 ativo');
 })();
