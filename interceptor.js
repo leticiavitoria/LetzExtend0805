@@ -450,6 +450,28 @@
     return textos;
   }
 
+  // v4.2.0 — O PAYLOAD VEM ESCAPADO.
+  // O batchexecute e JSON dentro de JSON, e o serializador do Google escreve
+  // & como & e = como =. A v4.1.0 aplicava o regex no texto CRU, e o
+  // padrao [^"'\\\s]+ parava no primeiro backslash — a URL assinada saia
+  // cortada exatamente em "?Expires", sem valor, sem KeyName e sem Signature.
+  // Dai o SERVER_FORBIDDEN em 100% dos downloads: pediamos uma URL sem
+  // assinatura. Reproduzido contra o log dela, caractere por caractere.
+  function _dottiDesescapar(texto) {
+    var t = String(texto || '');
+    try {
+      // O payload e uma string JSON: parsear resolve todo o escape de uma vez.
+      var v = JSON.parse(t);
+      if (typeof v === 'string') return v;
+      return JSON.stringify(v);
+    } catch (e) {
+      // Nao era JSON valido: desescapa o \uXXXX na unha.
+      return t.replace(/\\u([0-9a-fA-F]{4})/g, function (_, h) {
+        return String.fromCharCode(parseInt(h, 16));
+      });
+    }
+  }
+
   function _dottiUuidsDe(texto) {
     var achados = String(texto || '').match(_DOTTI_RE_UUID_TODOS) || [];
     var unicos = [];
@@ -501,12 +523,19 @@
     if (ids.indexOf('as29s') !== -1) {
       var argsUrl = _dottiArgsDoRpc(corpoReq, 'as29s');
       var idsUrl = _dottiUuidsDe(argsUrl || '');
-      var plUrl = _dottiPayloadsDoRpc(blocos, 'as29s').join(' ');
+      var plUrl = _dottiDesescapar(_dottiPayloadsDoRpc(blocos, 'as29s').join(' '));
       var mVideo = plUrl.match(/https:\/\/flow-content\.google\/video\/[^"'\\\s]+/);
       var mNumUrl = plUrl.match(_DOTTI_RE_PROMPT_NUM);
       console.log('[Dotti] rpc=as29s midias=' + idsUrl.length +
         (mNumUrl ? ' prompt=#' + mNumUrl[1] : ' prompt=?') +
         (mVideo ? ' url=sim' : ' url=nao'));
+      // Uma URL de CDN sem Signature e inutil: 403 na certa. Melhor recusar e
+      // dizer o motivo do que gastar tres tentativas com ela.
+      if (mVideo && mVideo[0].indexOf('Signature=') === -1) {
+        console.warn('[Dotti] as29s: URL sem Signature (extracao falhou?) — nao vou baixar: ' +
+          mVideo[0].substring(0, 120));
+        mVideo = null;
+      }
       if (mVideo) {
         document.dispatchEvent(new CustomEvent('dotti-flow-url', {
           detail: {
@@ -550,6 +579,23 @@
       }
     }
   }
+
+  // v4.2.0: sonda de diagnostico. O downloads API so devolve SERVER_FORBIDDEN,
+  // que nao distingue 403 de 404 de erro de rede. Aqui, da propria pagina (onde
+  // as requisicoes ao CDN funcionam), pegamos o status HTTP de verdade.
+  document.addEventListener('dotti-sondar-url', function (ev) {
+    var d = (ev && ev.detail) || {};
+    if (!d.url) return;
+    origFetch(d.url, { method: 'GET', credentials: 'include' })
+      .then(function (r) {
+        console.log('[Dotti] sonda HTTP ' + r.status + ' ' + (r.statusText || '') +
+          ' para ' + String(d.url).substring(0, 120));
+      })
+      .catch(function (e) {
+        console.warn('[Dotti] sonda de rede falhou: ' + (e && e.message) +
+          ' — ' + String(d.url).substring(0, 120));
+      });
+  });
 
   // Pedir a URL assinada por conta propria (Ajuste dela: da PAGINA, nao do
   // service worker — aqui a chamada sai identica as que o Flow ja faz, com
@@ -766,5 +812,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v4.1.0 ativo (as29s como fonte)');
+  console.log('[DottiInterceptor] v4.2.0 ativo (payload desescapado)');
 })();
