@@ -267,10 +267,21 @@ function setupMessageListener() {
             // ferramenta ficava parada e ela nao sabia por que.
             case "BATCH_PAUSE": {
                 const seg = data.secondsLeft || 0;
+                // v4.3.0: o relogio passa a vir do MOTOR. Antes ele usava um
+                // "Date.now() + 90000" fixo (panel.js:1081) — 90s que nao tinham
+                // relacao nenhuma com o intervalo configurado, e por isso
+                // travava em 01:30 enquanto a pausa real de 120s seguia.
+                const tab = getRunningTab() || activeTab;
+                const st = tabState[tab];
                 if (seg > 0) {
+                    st.countdownEndTime = Date.now() + seg * 1000;
+                    showCountdownTimer(tab);
                     updateStatus("warning", "Lote de " + data.batchSize +
                         " enviado — proximo lote em " + seg + "s");
                 } else {
+                    st.countdownEndTime = null;
+                    const t = el(tab, "timer");
+                    if (t) t.classList.add("hidden");
                     updateStatus("running", "Retomando o envio...");
                 }
                 break;
@@ -1078,7 +1089,9 @@ function showCountdownTimer(tab) {
     if (st.timerInterval) { clearTimeout(st.timerInterval); st.timerInterval = null; }
     const timer = el(tab, "timer");
     timer.classList.remove("hidden");
-    if (!st.countdownEndTime) st.countdownEndTime = Date.now() + 90000;
+    // v4.3.0: sem numero magico. Quem sabe quanto falta e o motor, que manda
+    // BATCH_PAUSE a cada segundo. Sem um fim definido, nao ha relogio.
+    if (!st.countdownEndTime) { timer.classList.add("hidden"); return; }
 
     function update() {
         if (!st.isRunning || !st.countdownEndTime) { timer.classList.add("hidden"); return; }

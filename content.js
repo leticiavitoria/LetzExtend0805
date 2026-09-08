@@ -177,6 +177,27 @@
 
         console.log("[Dotti DOM] switchMode: _mediaType=" + _mediaType + " mediaTarget=" + mediaTypeTarget + " subMode=" + subMode + " needElements=" + needElements);
 
+        // v4.3.0 — MEMORIA DO MODO.
+        // O popup de modo custa 3,6s de espera fixa e rodava INTEIRO em todo
+        // prompt, mesmo sem nada mudar: o log dela repete "Clicking videocam
+        // (was null)" nos 151 envios. O "was null" e o codigo nao conseguindo
+        // ler o estado do botao do popup, entao ele clica sempre.
+        //
+        // Pular quando nada mudou. Mas o Flow ja resetou o modo sozinho antes
+        // (ha ate um log "[Extend] modelo resetou apos Estender"), entao
+        // revalidamos a cada 10 prompts e em QUALQUER falha — velocidade nao
+        // vale um video com duracao errada.
+        const _duracaoAlvo = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
+        const _assinaturaModo = mediaTypeTarget + '|' + subMode + '|' + _duracaoAlvo +
+            '|' + (_firstPromptOfSession ? 'x1' : '-');
+
+        if (_modoAplicado === _assinaturaModo && _envriosDesdeRevalidacao < _REVALIDAR_MODO_A_CADA) {
+            _envriosDesdeRevalidacao++;
+            console.log('[Dotti DOM] modo inalterado (' + _assinaturaModo + ') — pulando o popup (' +
+                _envriosDesdeRevalidacao + '/' + _REVALIDAR_MODO_A_CADA + ' ate revalidar)');
+            return true;
+        }
+
         // v3.5.0: Sempre usar slate-helper (popup) — caminho de "tabs visiveis"
         // nao consegue setar duracao (4s/6s/8s estao apenas dentro do popup do Veo 3).
         const tabs = [];
@@ -196,10 +217,22 @@
 
             if (result.result === 'OK' || result.result === 'ALREADY_ACTIVE') {
                 if (_firstPromptOfSession) _firstPromptOfSession = false;
+                // So memoriza quando deu certo de verdade. Se algum alvo nao foi
+                // encontrado, o modo pode nao estar como pedimos — nao guardar.
+                const algumNaoAchado = Array.isArray(result.clicks) &&
+                    result.clicks.some(c => c && c.action === 'not_found');
+                if (algumNaoAchado) {
+                    _modoAplicado = null;
+                    console.log('[Dotti DOM] algum alvo nao foi encontrado — vou revalidar no proximo');
+                } else {
+                    _modoAplicado = _assinaturaModo;
+                    _envriosDesdeRevalidacao = 0;
+                }
                 console.log("[Dotti DOM] Modo trocado com sucesso: media=" + mediaTypeTarget + " sub=" + subMode);
                 return true;
             }
 
+            _modoAplicado = null;   // falhou: proximo prompt revalida
             console.log("[Dotti DOM] AVISO: Falha ao mudar modo via MAIN world —", result.result);
             return true;
         }
@@ -801,6 +834,19 @@
 
     async function clickCreateButton() {
         console.log("[Dotti DOM] Clicando no botao criar...");
+        // v4.3.0: o clique TRUSTED usa as coordenadas do botao. Com a tela
+        // rolada para baixo o botao pode sair da area visivel e o clique cai no
+        // lugar errado. Garantir que ele esta na tela antes de mirar.
+        try {
+            const _b = findSubmitButton();
+            if (_b) {
+                const r = _b.getBoundingClientRect();
+                if (r.top < 0 || r.bottom > (window.innerHeight || 0)) {
+                    _b.scrollIntoView({ block: 'center' });
+                    await sleep(150);
+                }
+            }
+        } catch (e) { }
 
         const createBtn = findSubmitButton();
 
@@ -917,7 +963,13 @@
     // download e trabalho de fundo.
     let _enviandoAgora = false;
 
+    // v4.3.0: memoria do modo aplicado (ver switchMode).
+    let _modoAplicado = null;
+    let _envriosDesdeRevalidacao = 0;
+    const _REVALIDAR_MODO_A_CADA = 10;
+
     async function executePrompt(prompt) {
+        const _t0Envio = Date.now();
         console.log("[Dotti DOM] ========================================");
         console.log("[Dotti DOM] Executando PROMPT", prompt.number);
         console.log("[Dotti DOM] Texto:", prompt.text.substring(0, 50) + "...");
@@ -932,9 +984,14 @@
             // escondia os botoes de modo do slate-helper.
             try { _fecharMenus(); } catch (e) { }
 
-            console.log("[Dotti DOM] Passo 1: Limpando elementos residuais...");
-            await clearElements();
-            await sleep(800);
+            // v4.3.0: o submitTask ja limpou logo antes de chamar aqui. Limpar
+            // de novo custava ~1,6s por prompt sem mudar nada. So limpamos
+            // quando o prompt USA elementos — ai a galeria precisa estar limpa.
+            if (hasElements) {
+                console.log("[Dotti DOM] Passo 1: Limpando elementos residuais...");
+                await clearElements();
+                await sleep(800);
+            }
 
             console.log("[Dotti DOM] Passo 2: Verificando modo...");
             const modeOk = await switchMode(hasElements, prompt.duration);
@@ -992,14 +1049,22 @@
                 return { success: false, error: "click_failed" };
             }
 
-            await sleep(2000);
+            // v4.3.0: esperar a CONDICAO (campo esvaziou = o Flow aceitou) em vez
+            // de dormir 2s cegos. Sai em ~200ms no caso normal.
+            {
+                const limite = Date.now() + 2500;
+                while (Date.now() < limite && !isPromptInputEmpty()) await sleep(200);
+            }
 
             if (!isPromptInputEmpty()) {
                 console.log("[Dotti DOM] AVISO: Input ainda tem conteudo, tentando enviar novamente...");
                 await clickCreateButton();
-                await sleep(1500);
+                const limite2 = Date.now() + 2000;
+                while (Date.now() < limite2 && !isPromptInputEmpty()) await sleep(200);
             }
 
+            console.log('[Dotti] envio #' + prompt.number + ' levou ' +
+                ((Date.now() - _t0Envio) / 1000).toFixed(1) + 's');
             console.log("[Dotti DOM] PROMPT", prompt.number, "executado com SUCESSO");
             console.log("[Dotti DOM] ========================================");
             return { success: true };
@@ -1396,6 +1461,54 @@
                 resolve(null);
             }, timeoutMs || 15000);
         });
+    }
+
+    // ============================================================
+    // v4.3.0 — ROLAGEM MINIMA (nao e cosmetica)
+    // ============================================================
+    // Ela apontou certo: os prompts que estouraram o teto (78, 82, 89, 95, 97)
+    // nao tem NENHUMA linha de as29s, e o run anterior fechou com "faltaram 4
+    // as29s". E a ressalva do ADENDO 21 se realizando — o as29s so sai quando a
+    // pagina RENDERIZA o tile. Sem renderizar, nao ha URL, nao ha download.
+    //
+    // Isto NAO reabre o DOM como fonte de identidade (quem nomeia continua
+    // sendo o as29s). E so garantir que o tile novo apareca na tela.
+    let _ultimaRolagemAoTopo = 0;
+    const _INTERVALO_ROLAGEM_MS = 20000;
+
+    function _containerDaGrade() {
+        const tiles = document.querySelectorAll('flow-grid-tile-container');
+        for (const t of tiles) {
+            for (let el = t.parentElement; el; el = el.parentElement) {
+                if (el.clientHeight > 200 && el.scrollHeight > el.clientHeight * 1.1) return el;
+            }
+        }
+        const vp = document.querySelector('cdk-virtual-scroll-viewport');
+        if (vp && vp.scrollHeight > vp.clientHeight) return vp;
+        return null;
+    }
+
+    // Os videos novos entram no TOPO da grade. Levar a grade ao topo faz o tile
+    // renderizar, e e o render que dispara o as29s.
+    function _levarGradeAoTopo(motivo) {
+        const el = _containerDaGrade();
+        if (!el) return false;
+        if (el.scrollTop === 0) return true;
+        const antes = el.scrollTop;
+        el.scrollTop = 0;
+        if (el.scrollTop !== antes) {
+            console.log('[Dotti] grade ao topo (' + motivo + '): ' + antes + ' -> ' + el.scrollTop);
+            return true;
+        }
+        return false;
+    }
+
+    // Chamado periodicamente pelo loop principal.
+    function _rolagemPeriodica() {
+        const agora = Date.now();
+        if (agora - _ultimaRolagemAoTopo < _INTERVALO_ROLAGEM_MS) return;
+        _ultimaRolagemAoTopo = agora;
+        _levarGradeAoTopo('periodica');
     }
 
     async function _bombearFilaDownload() {
@@ -2595,6 +2708,9 @@
         _poolAmbiguo.length = 0;
         _uuidsObservados.clear();
         _orfaosPedidos.clear();
+        _modoAplicado = null;
+        _envriosDesdeRevalidacao = 0;
+        _ultimaRolagemAoTopo = 0;
         _enviadosNaExecucao.clear();
         _as29sRecebidos.clear();
         _promptsBloqueados.clear();
@@ -3202,6 +3318,9 @@
                 break;
             }
 
+            // v4.3.0: a grade precisa mostrar os tiles novos para o as29s sair.
+            _rolagemPeriodica();
+
             // v4.2.0 — as29s ORFAO. No log dela: enviados=51, as29s recebidos=47.
             // Quatro prompts nunca receberam as29s, provavelmente porque a
             // pagina so pede a URL quando renderiza o tile. Passado um tempo,
@@ -3542,6 +3661,18 @@
             // v4.1.0 (pedido dela): a linha que responde, sozinha, se o as29s
             // depende do render da grade. Numeros batendo = ele dispara
             // sozinho. Faltando = a dependencia do DOM voltou.
+            // v4.3.0 (pedido dela): quantos enviados NUNCA receberam as29s. Zero
+            // = a rolagem resolveu. Diferente de zero = quem segurou foi o
+            // fallback do orfao. O proximo log responde sozinho.
+            const semAs29s = _promptList.filter(t =>
+                t.startedAt && !_promptComUuid.has(t.number)).map(t => t.number);
+            console.log('[Dotti] RESUMO — enviados sem as29s (' + semAs29s.length + '): ' +
+                (semAs29s.length ? semAs29s.join(', ') : '(nenhum)'));
+            if (_orfaosPedidos.size) {
+                console.log('[Dotti] RESUMO — ' + _orfaosPedidos.size +
+                    ' prompt(s) precisaram do fallback (pedimos a URL nos mesmos)');
+            }
+
             const baixados = _promptList.filter(t => t.downloaded).length;
             console.log('[Dotti] RESUMO — enviados=' + _enviadosNaExecucao.size +
                 ' · as29s recebidos=' + _as29sRecebidos.size +
@@ -3582,7 +3713,9 @@
                     enviados: _enviadosNaExecucao.size,
                     as29sRecebidos: _as29sRecebidos.size,
                     baixados: _promptList.filter(t => t.downloaded).length,
-                    bloqueados: Array.from(_promptsBloqueados)
+                    bloqueados: Array.from(_promptsBloqueados),
+                    semAs29s: semAs29s.length,
+                    orfaosPedidos: _orfaosPedidos.size
                 }
             });
         }
@@ -6285,7 +6418,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.2.0 ready (URL assinada completa; sonda HTTP; as29s orfao)");
+        console.log("[Lets Automate] v4.3.0 ready (rolagem minima; modo memorizado; relogio real)");
     }
 
     if (document.readyState === "loading") {
