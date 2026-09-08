@@ -1256,7 +1256,19 @@
                                         prompt.status = 'complete';
                                         console.log('[Dotti] Prompt #' + prompt.number + ' marcado complete (API, sem auto-download)');
                                     }
-                                    // Com auto-download, o scanner vai marcar 'complete' apos baixar
+                                }
+
+                                // v3.7.0: aqui ja sabemos TUDO — que ficou pronto,
+                                // qual e a midia e de qual prompt. Baixar agora, pela
+                                // API, em vez de delegar ao scanner do DOM.
+                                //
+                                // Era esta delegacao a raiz do problema: a grade e
+                                // virtualizada, so ~7 tiles existem, e um video que
+                                // fica pronto depois ja saiu da area visivel. Rolar a
+                                // tela era remendo de um problema que nao precisamos
+                                // ter — este caminho nao usa DOM nenhum.
+                                if (_autoDownload && prompt && !prompt.downloaded) {
+                                    _baixarPorMediaId(update.mediaId, prompt);
                                 }
                             }
                         }
@@ -1865,6 +1877,63 @@
     }
 
     // ============================================
+    // v3.7.0 — DOWNLOAD PELA API, SEM DOM
+    // Chamado assim que a API avisa COMPLETED. Nao depende da grade, do tile,
+    // da rolagem nem da virtualizacao. O caminho por menu nativo abaixo fica
+    // como fallback, para o caso de o COMPLETED nao chegar.
+    const _baixandoPorMedia = new Set();
+
+    async function _baixarPorMediaId(mediaId, prompt) {
+        if (!mediaId || !prompt) return false;
+        if (_baixandoPorMedia.has(mediaId)) return false; // evita corrida
+        _baixandoPorMedia.add(mediaId);
+
+        const filename = _nomeArquivoDoPrompt(prompt, (prompt.foundVideos || 0) + 1);
+        console.log('[Dotti] COMPLETED #' + prompt.number + ' -> baixando por mediaId (sem DOM): ' + filename);
+
+        // Ja conta como GERADO: a API confirmou, independente do download.
+        if (!prompt.gerado) {
+            prompt.gerado = true;
+            notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: prompt.number } });
+        }
+
+        try {
+            const r = await chrome.runtime.sendMessage({
+                action: 'DOWNLOAD_BY_MEDIA_ID',
+                mediaId: mediaId,
+                filename: filename,
+                folder: _downloadFolder
+            });
+            if (r && r.success) {
+                prompt.foundVideos = (prompt.foundVideos || 0) + 1;
+                if (prompt.foundVideos >= (prompt.expectedVideos || 1)) {
+                    prompt.downloaded = true;
+                    prompt.status = 'complete';
+                }
+                notifyPanel({
+                    type: 'VIDEO_DOWNLOADED',
+                    data: {
+                        promptNumber: prompt.number,
+                        mediaId: mediaId,
+                        url: null,
+                        downloadFolder: _downloadFolder
+                    }
+                });
+                console.log('[Dotti] Baixado por API: #' + prompt.number);
+                return true;
+            }
+            console.warn('[Dotti] Download por mediaId falhou (' +
+                (r && r.error ? r.error : 'sem resposta') +
+                '). O caminho por tile continua valendo como fallback.');
+        } catch (e) {
+            console.warn('[Dotti] Erro ao baixar por mediaId:', e.message);
+        } finally {
+            // Libera para o fallback / nova tentativa
+            _baixandoPorMedia.delete(mediaId);
+        }
+        return false;
+    }
+
     // v3.4.0 — DOWNLOAD PELO MENU NATIVO (Flow Angular)
     // ============================================
     // O DOM novo nao expoe mais a URL do video: um projeto com 18 videos tem
