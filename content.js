@@ -1139,6 +1139,39 @@
 
     function setupApiInterceptorListeners() {
         // Video submitted -> popular _mediaTracker (identico DarkPlanner)
+        // v3.8.0: a pagina esta buscando uma midia PELO ID — e o video que vai
+        // virar blob e ser baixado em seguida. _mediaTracker (montado no envio
+        // a partir do nosso proprio texto) diz de qual prompt e. Registramos o
+        // nome EXATO no background antes de o onCreated do blob disparar.
+        document.addEventListener('dotti-media-fetch', (e) => {
+            const mediaId = e.detail && e.detail.mediaId;
+            if (!mediaId) return;
+            const track = _mediaTracker.get(mediaId);
+            if (!track || !track.promptNumber) {
+                console.log('[Dotti] media-fetch mediaId sem prompt conhecido:', String(mediaId).substring(0, 12));
+                return;
+            }
+            const alvo = _promptList.find(p => p.number === track.promptNumber);
+            if (!alvo) return;
+
+            // A API ja confirmou que existe: conta como GERADO agora.
+            if (!alvo.gerado) {
+                alvo.gerado = true;
+                notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: alvo.number } });
+            }
+
+            const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
+            console.log('[Dotti] media-fetch mediaId=' + String(mediaId).substring(0, 12) +
+                ' -> prompt #' + alvo.number + ' -> ' + nome);
+            chrome.runtime.sendMessage({
+                action: 'EXPECT_DOWNLOAD_EXACT',
+                mediaId: mediaId,
+                filename: nome,
+                folder: _downloadFolder,
+                promptNumber: alvo.number
+            }).catch(() => { });
+        });
+
         document.addEventListener('dotti-video-submitted', (e) => {
             const { media, timestamp } = e.detail;
             console.log('[Dotti] API: video-submitted', media?.length, 'entries');
@@ -3534,6 +3567,9 @@
     // midia: nem href, nem data-*; o unico identificador e o aria-label, que
     // traz o prompt truncado).
     const _tilesBaixados = new Set();
+    // v3.8.0: barreira — um download por vez. Sem isso os cliques viravam
+    // rajada (10 "Download esperado" sem nenhum download criado).
+    let _downloadAtual = null; // { rotulo, resolve }
 
     let _avisouAutoDownloadOff = false;
 
@@ -3677,59 +3713,47 @@
             const rotulo = (tile.getAttribute("aria-label") || "").trim();
             if (!rotulo || _tilesBaixados.has(rotulo)) continue;
 
-            const prompt = _casarTileComPrompt(rotulo);
-
-            if (!prompt) continue; // _casarTileComPrompt ja logou o motivo
-
-            // v3.5.1: achar o tile ja prova que o Flow GEROU o video, mesmo que
-            // o download ainda nao tenha acontecido. Antes essa informacao se
-            // perdia: o unico sinal de "gerado" que chegava ao painel era o
-            // proprio VIDEO_DOWNLOADED, entao GERADOS so subia junto com
-            // BAIXADOS e ficava sempre igual. Marca aqui, antes de baixar.
-            if (!prompt.gerado) {
-                prompt.gerado = true;
-                notifyPanel({
-                    type: 'VIDEO_GENERATED',
-                    data: { promptNumber: prompt.number }
-                });
-                console.log('[Dotti Scanner] Prompt #' + prompt.number + ' GERADO (tile encontrado na grade)');
-            }
-
-            const filename = _nomeArquivoDoPrompt(prompt, prompt.foundVideos + 1);
-            console.log('[Dotti Scanner] Baixando tile #' + prompt.number + ' -> ' + filename);
-
-            // Avisa o background ANTES de clicar: o download vem do Flow e o
-            // listener renomeia o proximo que aparecer.
+            // v3.8.0: NAO casa mais por texto para decidir clicar. Clica em
+            // todo tile pronto ainda nao baixado; a identidade vem do
+            // interceptor (media-fetch -> mediaId -> prompt) no instante em
+            // que a pagina busca a midia para montar o blob. Se o mediaId nao
+            // chegar, o background cancela SEM re-baixar e o tile e retentado.
             try {
                 await chrome.runtime.sendMessage({
-                    action: 'EXPECT_DOWNLOAD',
-                    filename: filename,
-                    folder: _downloadFolder
+                    action: 'EXPECT_DOWNLOAD', placeholder: true, folder: _downloadFolder
                 });
             } catch (e) {
                 console.warn('[Dotti Scanner] EXPECT_DOWNLOAD falhou:', e.message);
                 continue;
             }
 
-            const ok = await baixarTilePeloMenu(tile);
-            if (ok) {
-                _tilesBaixados.add(rotulo);
-                prompt.foundVideos = (prompt.foundVideos || 0) + 1;
-                if (prompt.foundVideos >= prompt.expectedVideos) {
-                    prompt.downloaded = true;
-                    prompt.status = 'complete';
-                }
-                notifyPanel({
-                    type: 'VIDEO_DOWNLOADED',
-                    data: {
-                        promptNumber: prompt.number,
-                        mediaId: null,
-                        url: null,
-                        downloadFolder: _downloadFolder
+            // Barreira: espera o background responder (ou 15s) antes do proximo.
+            const esperaResultado = new Promise((resolve) => {
+                _downloadAtual = { rotulo: rotulo, resolve: resolve };
+                setTimeout(() => {
+                    if (_downloadAtual && _downloadAtual.rotulo === rotulo) {
+                        _downloadAtual = null;
+                        resolve({ ok: false, timeout: true });
                     }
-                });
+                }, 15000);
+            });
+
+            console.log('[Dotti Scanner] Clicando download do tile:', rotulo.substring(0, 45));
+            const clicou = await baixarTilePeloMenu(tile);
+            if (!clicou) {
+                _downloadAtual = null;
+                await sleep(800);
+                continue;
             }
-            await sleep(1200); // respiro entre downloads
+
+            const res = await esperaResultado;
+            if (res.ok) {
+                _tilesBaixados.add(rotulo);
+            } else {
+                console.log('[Dotti Scanner] Tile sem identidade/timeout — fica para retentar:',
+                    rotulo.substring(0, 45));
+            }
+            await sleep(800); // respiro entre downloads
         }
     }
 
@@ -4552,6 +4576,34 @@
                     folder: _downloadFolder,
                     promptNumber: alvo.number
                 });
+                break;
+            }
+
+            // v3.8.0: o background terminou de tratar o download nativo.
+            // ok=true -> re-baixado com nome exato; ok=false -> cancelado sem
+            // re-download (sem mediaId). Libera a barreira do loop de tiles.
+            case "DOWNLOAD_RESULTADO": {
+                const { ok, promptNumber, mediaId, filename } = message;
+                if (ok && promptNumber != null) {
+                    const alvo = _promptList.find(p => p.number === promptNumber);
+                    if (alvo) {
+                        alvo.foundVideos = (alvo.foundVideos || 0) + 1;
+                        if (alvo.foundVideos >= (alvo.expectedVideos || 1)) {
+                            alvo.downloaded = true;
+                            alvo.status = 'complete';
+                        }
+                        notifyPanel({
+                            type: 'VIDEO_DOWNLOADED',
+                            data: { promptNumber: alvo.number, mediaId: mediaId || null, url: null, downloadFolder: _downloadFolder }
+                        });
+                        console.log('[Dotti] Baixado com nome exato: #' + alvo.number + ' -> ' + filename);
+                    }
+                }
+                if (_downloadAtual) {
+                    const d = _downloadAtual; _downloadAtual = null;
+                    d.resolve({ ok: !!ok });
+                }
+                sendResponse({ success: true });
                 break;
             }
 
