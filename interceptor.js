@@ -349,6 +349,206 @@
     };
   }
 
+  // ============================================================
+  // v4.0.0 — batchexecute: a API de verdade do Flow novo
+  // ============================================================
+  // Capturado por ela no trafego real. Tres RPCs importam:
+  //   YhhmEf  envio   REQ: nosso texto ("PROMPT NNN")  RES: uuids da midia
+  //   jwpduf  status  REQ: mediaId                     RES: [2] gerando / [3] pronto
+  //   as29s   URL     REQ: mediaId                     RES: URL assinada do MP4
+  // Nada disso passava pelo interceptor porque ele procurava endpoints REST que
+  // nao existem mais — por isso "[Dotti] API: video-submitted" nunca aparecia.
+
+  var _DOTTI_RE_UUID_TODOS = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  var _DOTTI_RE_PROMPT_NUM = /PROMPT\s*0*(\d+)/i;
+
+  // Token de sessao das requisicoes (at=...). Guardado para podermos chamar o
+  // as29s por conta propria, sem depender de a pagina pedir a URL.
+  var _dottiAtToken = null;
+  function _dottiGuardarAt(corpo) {
+    try {
+      var m = String(corpo || '').match(/(?:^|&)at=([^&]+)/);
+      if (m) _dottiAtToken = decodeURIComponent(m[1]);
+    } catch (e) {}
+  }
+
+  // O corpo de saida pode ser string, URLSearchParams ou FormData.
+  function _dottiCorpoComoTexto(body) {
+    try {
+      if (!body) return '';
+      if (typeof body === 'string') return body;
+      if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return body.toString();
+      if (typeof FormData !== 'undefined' && body instanceof FormData) {
+        var partes = [];
+        body.forEach(function (v, k) { partes.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v))); });
+        return partes.join('&');
+      }
+      return String(body);
+    } catch (e) { return ''; }
+  }
+
+  function _dottiRpcIds(url) {
+    try {
+      var m = String(url || '').match(/[?&]rpcids=([^&]+)/);
+      return m ? decodeURIComponent(m[1]).split(',') : [];
+    } catch (e) { return []; }
+  }
+
+  // A resposta vem com o prefixo )]}' e em blocos precedidos pela contagem de
+  // bytes. Em vez de fatiar por tamanho (fragil), varremos linha a linha e
+  // parseamos o que for JSON valido.
+  function _dottiBlocosDaResposta(texto) {
+    var out = [];
+    var t = String(texto || '').replace(/^\)\]\}'\s*/, '');
+    var linhas = t.split('\n');
+    for (var i = 0; i < linhas.length; i++) {
+      var l = linhas[i].trim();
+      if (!l || /^\d+$/.test(l)) continue;   // linha de contagem de bytes
+      try { out.push(JSON.parse(l)); } catch (e) { }
+    }
+    return out;
+  }
+
+  // O payload util de cada envelope ["wrb.fr", rpcid, "<json>"] e uma STRING
+  // JSON que precisa ser parseada de novo. Devolve o texto cru concatenado
+  // (para regex) e os objetos parseados.
+  function _dottiPayloadsDoRpc(blocos, rpcid) {
+    var textos = [];
+    function visitar(no) {
+      if (!no) return;
+      if (Array.isArray(no)) {
+        if (no[0] === 'wrb.fr' && no[1] === rpcid && typeof no[2] === 'string') {
+          textos.push(no[2]);
+        }
+        for (var i = 0; i < no.length; i++) visitar(no[i]);
+      }
+    }
+    for (var b = 0; b < blocos.length; b++) visitar(blocos[b]);
+    return textos;
+  }
+
+  function _dottiUuidsDe(texto) {
+    var achados = String(texto || '').match(_DOTTI_RE_UUID_TODOS) || [];
+    var unicos = [];
+    for (var i = 0; i < achados.length; i++) {
+      var u = achados[i].toLowerCase();
+      if (unicos.indexOf(u) === -1) unicos.push(u);
+    }
+    return unicos;
+  }
+
+  // Estado do jwpduf. NAO indexamos por posicao: procuramos o numero que
+  // acompanha o mediaId dentro da estrutura ja parseada.
+  function _dottiEstadoDoStatus(payloadTexto) {
+    try {
+      var dados = JSON.parse(payloadTexto);
+      var encontrado = null;
+      (function visitar(no) {
+        if (encontrado !== null || !Array.isArray(no)) return;
+        // padrao observado: [..., <estado>, ...] com estado numerico pequeno
+        for (var i = 0; i < no.length; i++) {
+          var v = no[i];
+          if (typeof v === 'number' && v >= 1 && v <= 9) {
+            if (encontrado === null) encontrado = v;
+          } else if (Array.isArray(v)) visitar(v);
+        }
+      })(dados);
+      return encontrado;
+    } catch (e) { return null; }
+  }
+
+  function _dottiProcessarRpc(url, corpoReq, textoResp) {
+    var ids = _dottiRpcIds(url);
+    if (!ids.length) return;
+    _dottiGuardarAt(corpoReq);
+
+    var blocos = _dottiBlocosDaResposta(textoResp);
+    var reqTexto = decodeURIComponent(String(corpoReq || '').replace(/\+/g, ' '));
+
+    // ---- ENVIO ----
+    if (ids.indexOf('YhhmEf') !== -1) {
+      var mNum = reqTexto.match(_DOTTI_RE_PROMPT_NUM);
+      var payloads = _dottiPayloadsDoRpc(blocos, 'YhhmEf');
+      var uuids = _dottiUuidsDe(payloads.join(' '));
+      if (mNum && uuids.length) {
+        document.dispatchEvent(new CustomEvent('dotti-flow-envio', {
+          detail: {
+            promptNumber: Number(mNum[1]),
+            uuids: uuids,
+            promptText: reqTexto.substring(0, 400)
+          }
+        }));
+      }
+    }
+
+    // ---- STATUS ----
+    if (ids.indexOf('jwpduf') !== -1) {
+      var idsReq = _dottiUuidsDe(reqTexto);
+      var pl = _dottiPayloadsDoRpc(blocos, 'jwpduf');
+      var respTexto = pl.join(' ');
+      // Ajuste 1 dela: se o nosso texto vier na resposta, a amarracao sai desta
+      // mesma transacao — sem candidatos, sem lista negra.
+      var mNumResp = respTexto.match(_DOTTI_RE_PROMPT_NUM);
+      for (var i = 0; i < idsReq.length; i++) {
+        document.dispatchEvent(new CustomEvent('dotti-flow-status', {
+          detail: {
+            mediaId: idsReq[i],
+            estado: _dottiEstadoDoStatus(pl[0] || 'null'),
+            promptNumber: mNumResp ? Number(mNumResp[1]) : null
+          }
+        }));
+      }
+    }
+
+    // ---- URL ASSINADA ----
+    if (ids.indexOf('as29s') !== -1) {
+      var idsUrl = _dottiUuidsDe(reqTexto);
+      var plUrl = _dottiPayloadsDoRpc(blocos, 'as29s').join(' ');
+      var mVideo = plUrl.match(/https:\/\/flow-content\.google\/video\/[^"'\\\s]+/);
+      var mNumUrl = plUrl.match(_DOTTI_RE_PROMPT_NUM);
+      if (mVideo) {
+        document.dispatchEvent(new CustomEvent('dotti-flow-url', {
+          detail: {
+            mediaId: idsUrl[0] || null,
+            url: mVideo[0],
+            promptNumber: mNumUrl ? Number(mNumUrl[1]) : null
+          }
+        }));
+      }
+    }
+  }
+
+  // Pedir a URL assinada por conta propria (Ajuste dela: da PAGINA, nao do
+  // service worker — aqui a chamada sai identica as que o Flow ja faz, com
+  // sessao, cookies e headers no lugar).
+  document.addEventListener('dotti-pedir-url', function (ev) {
+    var mediaId = ev && ev.detail && ev.detail.mediaId;
+    if (!mediaId) return;
+    try {
+      var base = location.origin +
+        '/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=as29s&source-path=' +
+        encodeURIComponent(location.pathname);
+      var freq = JSON.stringify([[['as29s', JSON.stringify([mediaId]), null, 'generic']]]);
+      var corpo = 'f.req=' + encodeURIComponent(freq) +
+        (_dottiAtToken ? '&at=' + encodeURIComponent(_dottiAtToken) : '');
+      origFetch(base, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+        body: corpo
+      }).then(function (r) { return r.text(); }).then(function (txt) {
+        _dottiProcessarRpc(base, corpo, txt);
+      }).catch(function (e) {
+        console.warn('[DottiInterceptor] as29s falhou:', e && e.message);
+        document.dispatchEvent(new CustomEvent('dotti-flow-url', {
+          detail: { mediaId: mediaId, url: null, erro: String(e && e.message || e) }
+        }));
+      });
+    } catch (e) {
+      console.warn('[DottiInterceptor] as29s erro ao montar:', e && e.message);
+    }
+  });
+
   // Qualquer parametro que carregue um id de midia. Deliberadamente amplo:
   // e o content.js que decide se o id e conhecido.
   var _DOTTI_RE_ID = /[?&](?:name|mediaKey|mediaId|id)=[A-Za-z0-9_.:-]{8,}/;
@@ -450,7 +650,17 @@
       processVideoSubmitResponse(this.responseText);
     });
     if (checks.videoStatus) this.addEventListener('load', function() { processVideoStatusResponse(this.responseText); });
-    if (checks.rpc) this.addEventListener('load', function() { _dottiEmitUuids(this.responseText); });
+    if (checks.rpc) {
+        // v4.0.0: o ENVIO e XHR (nao fetch). Guardamos o corpo da requisicao
+        // porque e nele que esta o nosso "PROMPT NNN".
+        var _corpoReq = _dottiCorpoComoTexto(body);
+        var _urlReq = url;
+        this.addEventListener('load', function () {
+            try { _dottiProcessarRpc(_urlReq, _corpoReq, this.responseText); }
+            catch (e) { console.warn('[DottiInterceptor] rpc XHR erro:', e && e.message); }
+            _dottiEmitUuids(this.responseText);   // legado, atras da flag do content
+        });
+    }
     if (checks.imageGenerate) this.addEventListener('load', function() {
       if (this.status >= 200 && this.status < 300) processImageGenerateResponse(this.responseText);
       else _DOTTI_DEBUG && console.log('[DottiInterceptor] batchGenerateImages HTTP', this.status);
@@ -495,7 +705,17 @@
       r.clone().text().then(processVideoSubmitResponse).catch(function(){});
     }).catch(function(){});
     if (checks.videoStatus) p.then(function(r) { r.clone().text().then(processVideoStatusResponse).catch(function(){}); }).catch(function(){});
-    if (checks.rpc) p.then(function(r) { r.clone().text().then(_dottiEmitUuids).catch(function(){}); }).catch(function(){});
+    if (checks.rpc) {
+        var _corpoF = _dottiCorpoComoTexto(arguments[1] && arguments[1].body);
+        var _urlF = url;
+        p.then(function (r) {
+            r.clone().text().then(function (txt) {
+                try { _dottiProcessarRpc(_urlF, _corpoF, txt); }
+                catch (e) { console.warn('[DottiInterceptor] rpc fetch erro:', e && e.message); }
+                _dottiEmitUuids(txt);
+            }).catch(function () { });
+        }).catch(function () { });
+    }
     if (checks.imageGenerate) p.then(function(r) {
       if (r.ok) r.clone().text().then(processImageGenerateResponse).catch(function(){});
       else _DOTTI_DEBUG && console.log('[DottiInterceptor] batchGenerateImages HTTP', r.status);
@@ -507,5 +727,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v3.9.3 ativo');
+  console.log('[DottiInterceptor] v4.0.0 ativo (batchexecute)');
 })();

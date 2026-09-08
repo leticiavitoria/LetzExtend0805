@@ -2018,21 +2018,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // Nao depende da grade mostrar o tile, nem de rolagem, nem de
                 // virtualizacao, nem de casar texto.
                 case "DOWNLOAD_BY_MEDIA_ID": {
-                    const { mediaId, filename, folder } = message;
+                    const { mediaId, filename, folder, url } = message;
                     if (!mediaId || !filename) {
                         sendResponse({ success: false, error: "faltam mediaId/filename" });
                         break;
                     }
                     const destino = folder ? folder + "/" + filename : filename;
                     try {
-                        // Se ja vimos o redirect desta midia, usa direto;
-                        // senao resolve agora.
-                        const cache = _mediaUrlPorId.get(mediaId);
-                        let urlFinal = cache && cache.url;
+                        // v4.0.0: a URL assinada vem PRONTA da pagina (o RPC
+                        // as29s e chamado la, onde sessao, cookies e o token at
+                        // ja existem — no service worker eu teria que
+                        // reconstruir tudo a mao, que foi o erro das PRs
+                        // #22/#23). Aqui so baixamos.
+                        //
+                        // Ela expira (~6h), entao a pagina resolve na hora e
+                        // nunca guardamos URL velha para reusar.
+                        let urlFinal = url || null;
+                        if (!urlFinal) {
+                            const cache = _mediaUrlPorId.get(mediaId);
+                            urlFinal = cache && cache.url;
+                        }
                         if (!urlFinal) {
                             urlFinal = await _resolveDownloadRedirect(_urlDaMidia(mediaId));
                         }
                         if (!urlFinal) {
+                            console.warn("[Dotti] sem URL para " + mediaId.substring(0, 12) +
+                                " — nao vou baixar (nome certo sem arquivo e melhor que arquivo errado)");
                             sendResponse({ success: false, error: "sem url" });
                             break;
                         }
@@ -2046,6 +2057,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         // Marca como nosso para o listener de rename nao
                         // interceptar e renomear de novo o que ja veio certo.
                         if (id) _extendOurDownloadIds.add(id);
+
+                        // v4.0.0: a URL assinada pode ser recusada (403 por
+                        // expiracao). chrome.downloads.download() devolve id
+                        // mesmo assim, e o erro so aparece depois — se
+                        // respondessemos "success" aqui, a fila nunca tentaria
+                        // de novo com uma URL nova.
+                        const falhou = await _esperarFalhaDeDownload(id, 8000);
+                        if (falhou) {
+                            console.warn("[Dotti] download " + destino + " interrompido (" +
+                                falhou + ") — a pagina vai pedir outra URL assinada");
+                            sendResponse({ success: false, error: falhou });
+                            break;
+                        }
+
                         console.log("[Dotti] Baixado por mediaId:", destino, "(id=" + id + ")");
                         sendResponse({ success: true, downloadId: id });
                     } catch (e) {
@@ -2586,6 +2611,32 @@ let _extendOurDownloadIds = new Set(); // IDs criados por nos (skip para evitar 
 // v3.8.0: nome EXATO vindo do interceptor (mediaId -> prompt), registrado
 // entre o clique no menu e o onCreated do blob. Tem prioridade sobre tudo.
 let _nomeExatoPendente = null; // { fullName, promptNumber, mediaId, at }
+
+// v4.0.0: observa um download recem-criado e devolve o motivo se ele for
+// interrompido logo de cara (tipicamente 403 da URL assinada expirada).
+// Devolve null quando esta tudo bem.
+function _esperarFalhaDeDownload(id, timeoutMs) {
+    return new Promise((resolve) => {
+        if (!id) return resolve('sem id');
+        let pronto = false;
+        const terminar = (v) => {
+            if (pronto) return;
+            pronto = true;
+            try { chrome.downloads.onChanged.removeListener(ouvir); } catch (e) { }
+            resolve(v);
+        };
+        const ouvir = (delta) => {
+            if (delta.id !== id) return;
+            if (delta.state && delta.state.current === 'interrupted') {
+                terminar((delta.error && delta.error.current) || 'interrupted');
+            } else if (delta.state && delta.state.current === 'complete') {
+                terminar(null);
+            }
+        };
+        chrome.downloads.onChanged.addListener(ouvir);
+        setTimeout(() => terminar(null), timeoutMs || 8000);
+    });
+}
 
 function _installExtendDownloadListener(pending) {
     // v3.9.2: carimba a hora de entrada na fila. O nome exato vindo do
