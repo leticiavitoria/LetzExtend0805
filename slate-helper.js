@@ -1210,6 +1210,18 @@
     return itens;
   }
 
+  // Dois titulos sao o mesmo item? Tolera o corte com reticencias da lista,
+  // nunca "parecido" — semelhanca foi o que errou nome em 2 adendos.
+  function _gMesmoTitulo(a, b) {
+    // "…" e "..." sao o mesmo corte: normaliza os dois para um ponto so.
+    var na = _gNorm(a).replace(/[.…]+/g, '.').replace(/\.+$/, '');
+    var nb = _gNorm(b).replace(/[.…]+/g, '.').replace(/\.+$/, '');
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    if (na.length < 8 || nb.length < 8) return false;
+    return na.indexOf(nb) === 0 || nb.indexOf(na) === 0;
+  }
+
   // Botao que de fato inclui o item no comando. NUNCA o close/done/check:
   // era ele que a extensao apertava, cancelando a selecao (ADENDO 24).
   var _G_CONFIRMA_EXATO = ['incluir no comando', 'include in prompt',
@@ -1330,31 +1342,47 @@
       return;
     }
 
-    var atual = _gNorm(_gTxt(btn));
-    if (atual.indexOf('antigo') >= 0 || atual.indexOf('oldest') >= 0) {
-      console.log('[DottiSlateHelper] ja ordenado por mais antigo');
-      _dispatch('dotti-gallery-sort-result', { requestId: requestId, result: 'JA_ANTIGO' });
+    function ehAntigo(txt) {
+      var n = _gNorm(txt);
+      return n.indexOf('antig') >= 0 || n.indexOf('oldest') >= 0;
+    }
+
+    if (ehAntigo(_gTxt(btn))) {
+      console.log('[DottiSlateHelper] ja ordenado por mais antigos');
+      _dispatch('dotti-gallery-sort-result', { requestId: requestId, result: 'JA_ANTIGO', rotulo: _gTxt(btn) });
       return;
     }
 
     console.log('[DottiSlateHelper] abrindo ordenacao:', _gTxt(btn));
     _pointerClick(btn);
 
-    setTimeout(function() {
+    // v4.4.1: esperar o menu aparecer de verdade. Os 900ms fixos de antes
+    // transformavam um atraso de render em "personagem fixo quebrado".
+    var orcamentoMenu = 3000;
+    (function esperarMenu() {
       var ops = document.querySelectorAll(
         '[role="menuitem"], [role="option"], [role="menuitemradio"], mat-option, button.mat-mdc-menu-item');
       var listadas = [], escolhida = null;
       for (var j = 0; j < ops.length; j++) {
         if (!_gVisivel(ops[j])) continue;
-        var t = _gTxt(ops[j]);
-        listadas.push(t);
-        var n = _gNorm(t);
-        if (!escolhida && (n.indexOf('antig') >= 0 || n.indexOf('oldest') >= 0)) escolhida = ops[j];
+        var tx = _gTxt(ops[j]);
+        if (!tx) continue;
+        listadas.push(tx);
+        if (!escolhida && ehAntigo(tx)) escolhida = ops[j];
       }
+
+      if (!listadas.length) {
+        orcamentoMenu -= 250;
+        if (orcamentoMenu > 0) { setTimeout(esperarMenu, 250); return; }
+        console.log('[DottiSlateHelper] menu de ordenacao nao abriu');
+        _dispatch('dotti-gallery-sort-result',
+          { requestId: requestId, result: 'MENU_NAO_ABRIU', dump: _gDump(dlg) });
+        return;
+      }
+
       console.log('[DottiSlateHelper] opcoes de ordenacao:', listadas.join(' | '));
 
       if (!escolhida) {
-        // Fecha o menu para nao deixar overlay aberto por cima da janela
         try { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (err) {}
         _dispatch('dotti-gallery-sort-result',
           { requestId: requestId, result: 'SEM_OPCAO_ANTIGO', opcoes: listadas });
@@ -1363,9 +1391,29 @@
 
       console.log('[DottiSlateHelper] ordenando por:', _gTxt(escolhida));
       _pointerClick(escolhida);
-      _dispatch('dotti-gallery-sort-result',
-        { requestId: requestId, result: 'OK', opcoes: listadas, escolhida: _gTxt(escolhida) });
-    }, 900);
+
+      // v4.4.1: confirmar que pegou, em vez de presumir — mesma licao da rolagem.
+      var orcamentoRotulo = 3000;
+      (function confirmar() {
+        if (ehAntigo(_gTxt(btn))) {
+          _dispatch('dotti-gallery-sort-result', {
+            requestId: requestId, result: 'OK',
+            opcoes: listadas, escolhida: _gTxt(escolhida), rotulo: _gTxt(btn)
+          });
+          return;
+        }
+        orcamentoRotulo -= 250;
+        if (orcamentoRotulo <= 0) {
+          console.log('[DottiSlateHelper] ordenacao nao confirmada; rotulo segue:', _gTxt(btn));
+          _dispatch('dotti-gallery-sort-result', {
+            requestId: requestId, result: 'NAO_CONFIRMOU',
+            opcoes: listadas, escolhida: _gTxt(escolhida), rotulo: _gTxt(btn)
+          });
+          return;
+        }
+        setTimeout(confirmar, 250);
+      })();
+    })();
   });
 
   // ------ dotti-gallery-list (snapshot dos titulos) ------
@@ -1381,66 +1429,192 @@
       { requestId: requestId, result: titulos.length ? 'OK' : 'LISTA_VAZIA', titulos: titulos });
   });
 
-  // ------ dotti-gallery-pick (achar por titulo, selecionar e INCLUIR) ------
+  // ------ dotti-gallery-pick (selecionar a linha e INCLUIR no comando) ------
+  // v4.4.1: a versao anterior esperava o BOTAO ficar habilitado. Como a janela
+  // abre com o item 1 ja selecionado e o botao ja habilitado, a condicao era
+  // verdadeira na primeira volta e ela incluia sempre o primeiro personagem,
+  // qualquer que fosse o [N]. Agora confirmamos a LINHA (ADENDO 25).
+
+  // Assinatura do estado de uma linha: e comparando antes/depois que sabemos
+  // qual ficou selecionada, sem depender de nome de classe gerado pelo Angular.
+  function _gEstadoDaLinha(el) {
+    var partes = [
+      (el.className || '').toString(),
+      el.getAttribute('aria-selected') || '',
+      el.getAttribute('aria-checked') || '',
+      el.getAttribute('aria-current') || '',
+      el.getAttribute('data-selected') || ''
+    ];
+    var filho = el.querySelector('[aria-selected], [aria-checked], [class*="select"], [class*="activ"]');
+    if (filho) {
+      partes.push((filho.className || '').toString());
+      partes.push(filho.getAttribute('aria-selected') || '');
+      partes.push(filho.getAttribute('aria-checked') || '');
+    }
+    return partes.join('|');
+  }
+
+  // Qual linha esta selecionada: a que destoa das outras. Comparar os estados
+  // entre si funciona sem conhecer a classe que o Angular usa, e cobre tanto
+  // "mudou depois do clique" quanto "ja estava selecionada ao abrir".
+  function _gLinhaSelecionada(itens) {
+    if (itens.length < 2) return -1;
+    var estados = itens.map(function(it) { return _gEstadoDaLinha(it.el); });
+    var contagem = {};
+    for (var i = 0; i < estados.length; i++) contagem[estados[i]] = (contagem[estados[i]] || 0) + 1;
+    var unico = -1;
+    for (var j = 0; j < estados.length; j++) {
+      if (contagem[estados[j]] === 1) {
+        if (unico >= 0) return -1; // mais de uma destoando: nao da para afirmar
+        unico = j;
+      }
+    }
+    return unico;
+  }
+
+  // Alvos de clique, do mais provavel ao mais cru. O handler do Angular
+  // costuma estar num filho com papel, nao no container da linha.
+  function _gAlvosDeClique(linha) {
+    var alvos = [];
+    var papel = linha.querySelector('[role="option"], [role="button"], button, a');
+    if (papel) alvos.push({ el: papel, via: 'role/button' });
+    alvos.push({ el: linha, via: 'linha' });
+    var img = linha.querySelector('img');
+    if (img) alvos.push({ el: img, via: 'miniatura' });
+    return alvos;
+  }
+
+  function _gClicarAlvo(el) {
+    try { el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window })); } catch (err) {}
+    try { if (el.focus) el.focus(); } catch (err) {}
+    _pointerClick(el);
+  }
+
   document.addEventListener('dotti-gallery-pick', function(e) {
     var requestId = (e.detail && e.detail.requestId) || '';
-    var titulo = (e.detail && e.detail.titulo) || '';
-    var alvo = _gNorm(titulo);
+    var posicao = (e.detail && typeof e.detail.posicao === 'number') ? e.detail.posicao : 0; // 1-based
+    var tituloEsperado = (e.detail && e.detail.titulo) || '';
 
     var dlg = _gDialogo();
     if (!dlg) { _dispatch('dotti-gallery-pick-result', { requestId: requestId, result: 'SEM_DIALOGO' }); return; }
-    if (!alvo) { _dispatch('dotti-gallery-pick-result', { requestId: requestId, result: 'SEM_TITULO' }); return; }
 
     var itens = _gEnumerar(dlg, 300);
-    var linha = null;
-    for (var i = 0; i < itens.length; i++) {
-      if (_gNorm(itens[i].titulo) === alvo) { linha = itens[i]; break; }
-    }
-    // Titulo truncado com reticencias: casa por prefixo, nunca por semelhanca.
-    if (!linha) {
-      var base = alvo.replace(/[.…]+$/, '');
-      if (base.length >= 8) {
-        for (var p = 0; p < itens.length; p++) {
-          var cand = _gNorm(itens[p].titulo).replace(/[.…]+$/, '');
-          if (cand.indexOf(base) === 0 || base.indexOf(cand) === 0) { linha = itens[p]; break; }
-        }
-      }
-    }
-
-    if (!linha) {
-      console.log('[DottiSlateHelper] titulo nao encontrado na lista:', titulo);
-      _dispatch('dotti-gallery-pick-result', {
-        requestId: requestId, result: 'TITULO_NAO_ENCONTRADO',
-        titulos: itens.map(function(i) { return i.titulo; })
-      });
+    if (!itens.length) {
+      _dispatch('dotti-gallery-pick-result', { requestId: requestId, result: 'LISTA_VAZIA', dump: _gDump(dlg) });
       return;
     }
 
-    _pointerClick(linha.el);
+    var linha = null;
 
-    // Esperar o botao de incluir ficar disponivel (ele so habilita com item selecionado)
-    var orcamento = 4000;
-    (function esperar() {
-      var btn = _gBotaoConfirmar(dlg);
-      if (btn && !_gDesabilitado(btn)) {
-        console.log('[DottiSlateHelper] incluindo no comando:', linha.titulo.substring(0, 50));
-        _pointerClick(btn);
-        _dispatch('dotti-gallery-pick-result',
-          { requestId: requestId, result: 'OK', titulo: linha.titulo, botao: _gTxt(btn) });
-        return;
-      }
-      orcamento -= 250;
-      if (orcamento <= 0) {
-        console.log('[DottiSlateHelper] botao de incluir indisponivel');
+    // Caminho principal: posicao na ordem de criacao (ordenacao ja verificada).
+    if (posicao >= 1) {
+      if (posicao > itens.length) {
         _dispatch('dotti-gallery-pick-result', {
-          requestId: requestId,
-          result: btn ? 'BOTAO_DESABILITADO' : 'SEM_BOTAO_INCLUIR',
-          titulo: linha.titulo, dump: _gDump(dlg)
+          requestId: requestId, result: 'POSICAO_FORA_DA_LISTA',
+          posicao: posicao, total: itens.length,
+          titulos: itens.map(function(i) { return i.titulo; })
         });
         return;
       }
-      setTimeout(esperar, 250);
-    })();
+      linha = itens[posicao - 1];
+
+      // Conferencia: a linha N tem de ser a mesma do snapshot. Se o nome mudou,
+      // a lista mudou debaixo de nos — aborta em vez de incluir outro.
+      if (tituloEsperado && !_gMesmoTitulo(linha.titulo, tituloEsperado)) {
+        console.log('[DottiSlateHelper] linha', posicao, 'mudou de nome: esperava "' +
+          tituloEsperado + '", achei "' + linha.titulo + '"');
+        _dispatch('dotti-gallery-pick-result', {
+          requestId: requestId, result: 'TITULO_DIVERGENTE',
+          posicao: posicao, esperado: tituloEsperado, encontrado: linha.titulo,
+          titulos: itens.map(function(i) { return i.titulo; })
+        });
+        return;
+      }
+    } else if (tituloEsperado) {
+      // Caminho alternativo: por nome (usado quando nao ha posicao confiavel).
+      for (var i = 0; i < itens.length && !linha; i++) {
+        if (_gMesmoTitulo(itens[i].titulo, tituloEsperado)) linha = itens[i];
+      }
+      if (!linha) {
+        _dispatch('dotti-gallery-pick-result', {
+          requestId: requestId, result: 'TITULO_NAO_ENCONTRADO',
+          titulos: itens.map(function(i) { return i.titulo; })
+        });
+        return;
+      }
+    } else {
+      _dispatch('dotti-gallery-pick-result', { requestId: requestId, result: 'SEM_ALVO' });
+      return;
+    }
+
+    var indiceAlvo = itens.indexOf(linha);
+    var alvos = _gAlvosDeClique(linha.el);
+    var tentativa = 0;
+    var orcamento = 0;
+
+    function selecionada() {
+      return _gLinhaSelecionada(itens) === indiceAlvo;
+    }
+
+    // A janela abre com um item ja selecionado. Se for justamente o nosso, nao
+    // ha o que clicar — e foi por nao distinguir isso que a versao anterior
+    // incluia sempre o primeiro, qualquer que fosse o [N].
+    if (selecionada()) {
+      console.log('[DottiSlateHelper] linha', (posicao || '?'), 'ja estava selecionada');
+      incluir();
+      return;
+    }
+
+    function proximoAlvo() {
+      if (tentativa >= alvos.length) {
+        console.log('[DottiSlateHelper] selecao nao confirmada para a linha', (posicao || '?'));
+        _dispatch('dotti-gallery-pick-result', {
+          requestId: requestId, result: 'SELECAO_NAO_CONFIRMADA',
+          posicao: posicao, titulo: linha.titulo, dump: _gDump(dlg)
+        });
+        return;
+      }
+      var alvo = alvos[tentativa++];
+      console.log('[DottiSlateHelper] clicando linha', (posicao || '?'), 'via', alvo.via);
+      _gClicarAlvo(alvo.el);
+      orcamento = 1200;
+      setTimeout(esperarSelecao, 200);
+    }
+
+    function esperarSelecao() {
+      if (selecionada()) { incluir(); return; }
+      orcamento -= 200;
+      if (orcamento <= 0) { proximoAlvo(); return; }
+      setTimeout(esperarSelecao, 200);
+    }
+
+    function incluir() {
+      var espera = 3000;
+      (function tentar() {
+        var btn = _gBotaoConfirmar(dlg);
+        if (btn && !_gDesabilitado(btn)) {
+          console.log('[DottiSlateHelper] incluindo no comando:', linha.titulo.substring(0, 50));
+          _pointerClick(btn);
+          _dispatch('dotti-gallery-pick-result', {
+            requestId: requestId, result: 'OK',
+            posicao: posicao, titulo: linha.titulo, botao: _gTxt(btn)
+          });
+          return;
+        }
+        espera -= 250;
+        if (espera <= 0) {
+          _dispatch('dotti-gallery-pick-result', {
+            requestId: requestId,
+            result: btn ? 'BOTAO_DESABILITADO' : 'SEM_BOTAO_INCLUIR',
+            posicao: posicao, titulo: linha.titulo, dump: _gDump(dlg)
+          });
+          return;
+        }
+        setTimeout(tentar, 250);
+      })();
+    }
+
+    proximoAlvo();
   });
 
   // ------ dotti-gallery-dump (diagnostico; sai sozinho em qualquer falha) ------
