@@ -441,92 +441,112 @@
         console.log("[Dotti DOM] Limpeza de elementos concluida");
     }
 
-    // ====== v4.4.0: personagem fixo [N] por TITULO, nao por posicao ======
-    // A janela nova de recursos reordena a lista pelo USO: usar o personagem 3
-    // o joga para o topo. Por isso [N] deixa de ser "a N-esima linha" e passa a
-    // ser "o item que estava na posicao N quando a lista foi ordenada por mais
-    // antigo" — e dai em diante procuramos esse item pelo NOME dele. Ver ADENDO 24.
+    // ====== v4.4.1: personagem fixo [N] (ADENDO 25) ======
+    // Com a ordenacao em "Mais antigos" a lista fica em ordem de criacao e NAO
+    // se reordena pelo uso — ela conferiu. Entao [N] e a N-esima linha, desde
+    // que a ordenacao seja de fato aplicada (e nos verificamos isso).
+    // O titulo deixa de ser chave de busca e vira conferencia: se a linha N
+    // mudou de nome entre o snapshot e a inclusao, abortamos.
     let _mapaElementos = null;        // Map<number, string> -> [N] = titulo
-    let _mapaElementosProjeto = null; // url do projeto em que o mapa foi montado
+    let _mapaElementosProjeto = null;
+    let _dumpGaleriaFeito = false;    // um dump por execucao, com sucesso ou nao
 
     function _projetoAtual() {
         try { return location.pathname; } catch (e) { return ''; }
     }
 
+    function _logGaleria(msg) {
+        console.log('[Dotti Galeria] ' + msg);
+    }
+
     function _invalidarMapaDeElementos(motivo) {
-        if (_mapaElementos) console.log('[Dotti DOM] mapa de elementos descartado:', motivo);
+        if (_mapaElementos) _logGaleria('mapa descartado: ' + motivo);
         _mapaElementos = null;
         _mapaElementosProjeto = null;
+    }
+
+    // Chamado no inicio de cada execucao (resetElementState) para o dump sair
+    // de novo e o mapa ser refeito se ela mexeu nas imagens entre as rodadas.
+    function _resetarGaleriaDaExecucao() {
+        _dumpGaleriaFeito = false;
+        _invalidarMapaDeElementos('nova execucao');
     }
 
     async function _dumpGaleria(motivo) {
         try {
             const info = await requestSlateHelper('dotti-gallery-dump', {}, 'dotti-gallery-dump-result', 4000);
-            console.log('[Dotti DOM] DUMP da janela de recursos (' + motivo + '):', JSON.stringify(info));
+            _logGaleria('DUMP (' + motivo + '): ' + JSON.stringify(info));
         } catch (e) {
-            console.log('[Dotti DOM] DUMP falhou:', e && e.message);
+            _logGaleria('DUMP falhou: ' + (e && e.message));
         }
     }
 
     async function _abrirGaleria() {
         const openResult = await requestSlateHelper('dotti-open-gallery', {}, 'dotti-open-gallery-result', 5000);
-        console.log('[Dotti DOM] galeria open:', JSON.stringify(openResult));
-        if (openResult.result !== 'OK') return false;
+        _logGaleria('passo 1/5 abrir janela -> ' + openResult.result);
+        if (openResult.result !== 'OK') {
+            if (openResult.buttons) _logGaleria('botoes vistos: ' + openResult.buttons.join(', '));
+            return false;
+        }
 
         const pronta = await waitFor(() => {
             return document.querySelectorAll('[role="dialog"] img, mat-dialog-container img, .cdk-overlay-pane img').length > 0;
         }, 8000);
         if (!pronta) {
-            console.log('[Dotti DOM] janela de recursos nao abriu');
+            _logGaleria('janela de recursos nao abriu');
             await _dumpGaleria('janela nao abriu');
             return false;
         }
         await sleep(600);
+
+        if (!_dumpGaleriaFeito) {
+            _dumpGaleriaFeito = true;
+            await _dumpGaleria('primeira abertura da execucao');
+        }
         return true;
     }
 
     async function _fecharGaleria() {
         const r = await requestSlateHelper('dotti-gallery-cancel', {}, 'dotti-gallery-cancel-result', 3000);
-        console.log('[Dotti DOM] galeria fechada:', r.result, r.via || '');
+        _logGaleria('janela fechada -> ' + r.result + (r.via ? ' (' + r.via + ')' : ''));
         await sleep(400);
     }
 
-    // Monta o mapa uma vez por projeto: aba Imagens + ordem de criacao.
-    // Ordem de criacao nao muda quando ela usa um personagem — por isso e ela,
-    // e nao "Recentes", que define o que [1], [2], [3] significam.
-    async function _montarMapaDeElementos() {
-        if (_mapaElementos && _mapaElementosProjeto === _projetoAtual()) return true;
-        _invalidarMapaDeElementos('projeto mudou ou primeira montagem');
-
-        console.log('[Dotti DOM] montando mapa de elementos ([N] -> titulo)...');
-        if (!await _abrirGaleria()) return false;
-
+    async function _abaImagens() {
         const aba = await requestSlateHelper(
             'dotti-gallery-tab', { nomes: ['Imagens', 'Images'] }, 'dotti-gallery-tab-result', 5000);
-        console.log('[Dotti DOM] aba Imagens:', aba.result, aba.aba || '');
-        if (aba.result !== 'OK') {
-            console.log('[Dotti DOM] ERRO: aba "Imagens" nao encontrada — nao vou adivinhar a lista');
-            await _dumpGaleria('aba Imagens nao encontrada');
-            await _fecharGaleria();
-            return false;
-        }
-        await sleep(1200);
+        _logGaleria('passo 2/5 aba Imagens -> ' + aba.result + (aba.aba ? ' ("' + aba.aba + '")' : ''));
+        if (aba.result !== 'OK') await _dumpGaleria('aba Imagens nao encontrada');
+        return aba.result === 'OK';
+    }
 
-        const ord = await requestSlateHelper('dotti-gallery-sort', {}, 'dotti-gallery-sort-result', 6000);
-        console.log('[Dotti DOM] ordenacao:', ord.result, (ord.opcoes || []).join(' | '));
-        if (ord.result !== 'OK' && ord.result !== 'JA_ANTIGO') {
-            // Sem ordem de criacao a posicao e a de "Recentes", que muda com o
-            // uso. Montar o mapa aqui seria apostar no personagem errado.
-            console.log('[Dotti DOM] ERRO: nao consegui ordenar por mais antigo (' + ord.result + ')');
-            await _dumpGaleria('ordenacao indisponivel');
-            await _fecharGaleria();
-            return false;
-        }
+    async function _ordenarPorCriacao() {
+        const ord = await requestSlateHelper('dotti-gallery-sort', {}, 'dotti-gallery-sort-result', 10000);
+        _logGaleria('passo 3/5 ordenar -> ' + ord.result +
+            (ord.rotulo ? ' ("' + ord.rotulo + '")' : '') +
+            (ord.opcoes ? ' (opcoes: ' + ord.opcoes.join(' | ') + ')' : ''));
+        if (ord.result === 'OK' || ord.result === 'JA_ANTIGO') return true;
+        // Sem ordem de criacao confirmada a posicao e a de "Recentes", que muda
+        // com o uso. Incluir aqui seria apostar no personagem errado.
+        _logGaleria('ERRO: ordenacao por mais antigos nao confirmada — nao vou adivinhar a ordem');
+        await _dumpGaleria('ordenacao ' + ord.result);
+        return false;
+    }
+
+    async function _montarMapaDeElementos() {
+        if (_mapaElementos && _mapaElementosProjeto === _projetoAtual()) return true;
+        _invalidarMapaDeElementos('primeira montagem ou projeto novo');
+
+        _logGaleria('montando mapa de elementos...');
+        if (!await _abrirGaleria()) return false;
+        if (!await _abaImagens()) { await _fecharGaleria(); return false; }
+        await sleep(1200);
+        if (!await _ordenarPorCriacao()) { await _fecharGaleria(); return false; }
         await sleep(1500);
 
         const lista = await requestSlateHelper('dotti-gallery-list', {}, 'dotti-gallery-list-result', 15000);
+        _logGaleria('passo 4/5 lista -> ' + lista.result + ' (' + ((lista.titulos || []).length) + ' itens)');
         if (lista.result !== 'OK' || !lista.titulos || !lista.titulos.length) {
-            console.log('[Dotti DOM] ERRO: lista de imagens vazia (' + lista.result + ')');
             await _dumpGaleria('lista vazia');
             await _fecharGaleria();
             return false;
@@ -538,7 +558,7 @@
 
         const resumo = [];
         _mapaElementos.forEach((t, n) => resumo.push('[' + n + ']=' + t.substring(0, 40)));
-        console.log('[Dotti DOM] mapa de elementos: ' + resumo.join(' '));
+        _logGaleria('mapa de elementos: ' + resumo.join('  '));
 
         await _fecharGaleria();
         return true;
@@ -547,55 +567,47 @@
     // Adiciona UM elemento [elementNum] ao comando atual.
     async function addElement(elementNum) {
         if (!await _montarMapaDeElementos()) {
-            console.log('[Dotti DOM] ERRO: sem mapa de elementos — elemento', elementNum, 'nao adicionado');
+            _logGaleria('ERRO: sem mapa — elemento [' + elementNum + '] nao adicionado');
             return false;
         }
 
         const titulo = _mapaElementos.get(elementNum);
         if (!titulo) {
-            console.log('[Dotti DOM] ERRO: elemento [' + elementNum + '] inexistente — a lista tem ' +
+            _logGaleria('ERRO: elemento [' + elementNum + '] inexistente — a lista tem ' +
                 _mapaElementos.size + ' imagem(ns)');
             return false;
         }
-        console.log('[Dotti DOM] elemento [' + elementNum + '] = "' + titulo + '"');
+        _logGaleria('elemento [' + elementNum + '] = "' + titulo + '"');
 
         if (!await _abrirGaleria()) return false;
-
-        const aba = await requestSlateHelper(
-            'dotti-gallery-tab', { nomes: ['Imagens', 'Images'] }, 'dotti-gallery-tab-result', 5000);
-        if (aba.result !== 'OK') {
-            console.log('[Dotti DOM] ERRO: aba "Imagens" sumiu na hora de escolher');
-            await _dumpGaleria('aba Imagens sumiu');
-            await _fecharGaleria();
-            return false;
-        }
+        if (!await _abaImagens()) { await _fecharGaleria(); return false; }
+        await sleep(1200);
+        if (!await _ordenarPorCriacao()) { await _fecharGaleria(); return false; }
         await sleep(1200);
 
-        // Nao reordenamos aqui: a busca e por nome, entao a ordem da lista neste
-        // momento e irrelevante. Menos cliques, menos chance de quebrar.
         const pick = await requestSlateHelper(
-            'dotti-gallery-pick', { titulo: titulo }, 'dotti-gallery-pick-result', 20000);
-        console.log('[Dotti DOM] incluir no comando:', pick.result, (pick.titulo || '').substring(0, 40));
+            'dotti-gallery-pick', { posicao: elementNum, titulo: titulo },
+            'dotti-gallery-pick-result', 25000);
+        _logGaleria('passo 5/5 incluir [' + elementNum + '] -> ' + pick.result +
+            (pick.titulo ? ' ("' + pick.titulo + '")' : ''));
 
         if (pick.result !== 'OK') {
-            if (pick.result === 'TITULO_NAO_ENCONTRADO') {
-                console.log('[Dotti DOM] titulos disponiveis:', (pick.titulos || []).join(' | '));
-                // O item saiu da lista (apagado/renomeado): o mapa envelheceu.
-                _invalidarMapaDeElementos('titulo [' + elementNum + '] sumiu da lista');
-            } else if (pick.dump) {
-                console.log('[Dotti DOM] DUMP:', JSON.stringify(pick.dump));
+            if (pick.titulos) _logGaleria('titulos na lista: ' + pick.titulos.join(' | '));
+            if (pick.result === 'TITULO_DIVERGENTE' || pick.result === 'POSICAO_FORA_DA_LISTA') {
+                // A lista mudou desde o snapshot: refaz no proximo prompt.
+                _invalidarMapaDeElementos('lista mudou (' + pick.result + ')');
             }
+            if (pick.dump) _logGaleria('DUMP: ' + JSON.stringify(pick.dump));
             await _fecharGaleria();
             return false;
         }
 
-        // A janela fecha sozinha ao incluir; se nao fechar, fechamos.
         await sleep(1200);
         const aindaAberta = document.querySelectorAll(
             '[role="dialog"] img, mat-dialog-container img, .cdk-overlay-pane img').length > 0;
         if (aindaAberta) await _fecharGaleria();
 
-        console.log('[Dotti DOM] elemento [' + elementNum + '] adicionado');
+        _logGaleria('elemento [' + elementNum + '] incluido no comando');
         return true;
     }
 
@@ -3352,6 +3364,7 @@
         _activeSlots = 0;
         _consecutiveErrorCount = 0;
         _enviadosNoLote = 0;
+        _resetarGaleriaDaExecucao();
 
         console.log('[Dotti] processAllPromptsWithSlots: ' + _promptList.length + ' prompts, ' + _maxSimultaneous + ' slots');
 
@@ -6492,7 +6505,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.4.0 ready (personagem fixo por titulo)");
+        console.log("[Lets Automate] v4.4.1 ready (personagem fixo: selecao confirmada)");
     }
 
     if (document.readyState === "loading") {

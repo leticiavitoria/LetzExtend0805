@@ -2519,3 +2519,17 @@ function wireExtendTab() {
         else if (msg.type === "SCENE_QUEUE_COMPLETE") handleSceneQueueComplete();
     });
 })();
+
+// v4.4.1: a versao na sidebar era uma string fixa no panel.html e nunca mudava
+// entre builds — por isso nao dava para saber se a extensao foi recarregada.
+(function mostrarVersao() {
+    function aplicar() {
+        const el = document.getElementById("versaoExtensao");
+        if (!el) return;
+        let v = "";
+        try { v = chrome.runtime.getManifest().version; } catch (e) { }
+        el.textContent = "Lets Automate" + (v ? " v" + v : "");
+    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", aplicar);
+    else aplicar();
+})();
