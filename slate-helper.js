@@ -1067,9 +1067,413 @@
     });
   });
 
+  // ====== GALERIA v4.4.0 — janela "Pesquisar recursos" (Angular) ======
+  // A janela nova nao inclui a imagem ao clicar na miniatura: ela so seleciona
+  // e mostra a pre-visualizacao. Quem inclui e o botao "Incluir no comando".
+  // Alem disso a lista se reordena pelo USO, entao posicao nao e identidade —
+  // amarramos cada [N] ao TITULO do item (ver ADENDO 24).
+
+  function _gTxt(el) {
+    return ((el && el.textContent) || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function _gNorm(s) {
+    return (s || '').toString().toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+
+  // Texto de uma linha: junta os pedacos com espaco. textContent cru cola
+  // "Old sailor portrait" com "Imagem" e deixa o log ilegivel.
+  function _gTextoDeLinha(el) {
+    var partes = [];
+    (function anda(n) {
+      for (var i = 0; i < n.childNodes.length; i++) {
+        var c = n.childNodes[i];
+        if (c.nodeType === 3) {
+          var t = (c.nodeValue || '').replace(/\s+/g, ' ').trim();
+          if (t) partes.push(t);
+        } else if (c.nodeType === 1) {
+          var tag = c.tagName.toLowerCase();
+          var cls = (c.className || '').toString();
+          if (tag === 'mat-icon' || tag === 'i' ||
+              cls.indexOf('material-icons') >= 0 || cls.indexOf('material-symbols') >= 0) continue;
+          anda(c);
+        }
+      }
+    })(el);
+    return partes.join(' ');
+  }
+
+  function _gVisivel(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  // O dialogo e o maior overlay visivel. Nao exigimos <img>: a aba
+  // "Personagens" pode estar vazia e ainda assim ser o dialogo certo.
+  function _gDialogo() {
+    var cands = document.querySelectorAll(
+      '[role="dialog"], mat-dialog-container, .mat-mdc-dialog-container, .cdk-overlay-pane');
+    var melhor = null, melhorArea = 0;
+    for (var i = 0; i < cands.length; i++) {
+      if (!_gVisivel(cands[i])) continue;
+      var r = cands[i].getBoundingClientRect();
+      var area = r.width * r.height;
+      if (area > melhorArea) { melhor = cands[i]; melhorArea = area; }
+    }
+    return melhor;
+  }
+
+  // A lista e o container cujos FILHOS DIRETOS carregam mais imagens. O painel
+  // de pre-visualizacao tem uma <img> sozinha, entao perde por construcao — foi
+  // essa contaminacao que quebrou a contagem por querySelectorAll('img').
+  function _gContainerDaLista(dlg) {
+    var imgs = [];
+    var todas = dlg.querySelectorAll('img');
+    for (var i = 0; i < todas.length; i++) if (_gVisivel(todas[i])) imgs.push(todas[i]);
+
+    var pais = [], conjuntos = [];
+    for (var j = 0; j < imgs.length; j++) {
+      var el = imgs[j];
+      for (var d = 0; d < 8 && el && el !== dlg; d++) {
+        var pai = el.parentElement;
+        if (!pai) break;
+        var k = pais.indexOf(pai);
+        if (k < 0) { pais.push(pai); conjuntos.push([el]); }
+        else if (conjuntos[k].indexOf(el) < 0) conjuntos[k].push(el);
+        el = pai;
+      }
+    }
+
+    var melhor = null, n = 0;
+    for (var p = 0; p < pais.length; p++) {
+      if (conjuntos[p].length > n) { n = conjuntos[p].length; melhor = pais[p]; }
+    }
+    return n >= 2 ? melhor : null;
+  }
+
+  function _gLinhas(dlg) {
+    var cont = _gContainerDaLista(dlg);
+    if (!cont) return [];
+    var out = [];
+    for (var i = 0; i < cont.children.length; i++) {
+      var c = cont.children[i];
+      if (!c.querySelector('img')) continue;
+      if (!_gVisivel(c)) continue;
+      out.push(c);
+    }
+    return out;
+  }
+
+  // O container rolavel que contem a lista (a janela pode ter dezenas de itens).
+  function _gRolavel(el) {
+    var cur = el;
+    for (var i = 0; i < 8 && cur; i++) {
+      if (cur.scrollHeight > cur.clientHeight + 20 && cur.clientHeight > 80) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  // Percorre a lista inteira rolando, devolvendo [{titulo, el}] sem repetir.
+  function _gEnumerar(dlg, limite) {
+    var vistos = [], itens = [];
+    var cont = _gContainerDaLista(dlg);
+    var rol = cont ? _gRolavel(cont) : null;
+
+    function colher() {
+      var linhas = _gLinhas(dlg);
+      for (var i = 0; i < linhas.length; i++) {
+        var t = _gTextoDeLinha(linhas[i]);
+        if (!t) continue;
+        if (vistos.indexOf(t) >= 0) continue;
+        vistos.push(t);
+        itens.push({ titulo: t, el: linhas[i] });
+      }
+    }
+
+    colher();
+    if (!rol) return itens;
+
+    var antes = -1, passos = 0;
+    while (passos < 40 && itens.length < (limite || 300) && rol.scrollTop !== antes) {
+      antes = rol.scrollTop;
+      rol.scrollTop = rol.scrollTop + Math.max(120, rol.clientHeight - 60);
+      colher();
+      passos++;
+      if (rol.scrollTop === antes) break;
+    }
+    rol.scrollTop = 0;
+    colher();
+    return itens;
+  }
+
+  // Botao que de fato inclui o item no comando. NUNCA o close/done/check:
+  // era ele que a extensao apertava, cancelando a selecao (ADENDO 24).
+  var _G_CONFIRMA_EXATO = ['incluir no comando', 'include in prompt',
+                           'adicionar ao comando', 'add to prompt', 'inserir no comando'];
+
+  function _gBotaoConfirmar(dlg) {
+    var btns = dlg.querySelectorAll('button, [role="button"]');
+    var candidato = null;
+    for (var i = 0; i < btns.length; i++) {
+      if (!_gVisivel(btns[i])) continue;
+      var t = _gNorm(_gTxt(btns[i]));
+      if (!t) continue;
+      if (_G_CONFIRMA_EXATO.indexOf(t) >= 0) return btns[i];
+      var temAlvo = (t.indexOf('comando') >= 0 || t.indexOf('prompt') >= 0);
+      var temVerbo = (t.indexOf('inclu') >= 0 || t.indexOf('adicion') >= 0 ||
+                      t.indexOf('include') >= 0 || t.indexOf('add') >= 0 || t.indexOf('inser') >= 0);
+      if (temAlvo && temVerbo && t.length < 40 && !candidato) candidato = btns[i];
+    }
+    return candidato;
+  }
+
+  function _gDesabilitado(btn) {
+    if (!btn) return true;
+    if (btn.disabled) return true;
+    var a = btn.getAttribute('aria-disabled');
+    return a === 'true';
+  }
+
+  // Clica numa aba do menu lateral (Tudo / Imagens / Personagens / ...)
+  function _gClicarAba(dlg, nomes) {
+    var alvos = [];
+    for (var n = 0; n < nomes.length; n++) alvos.push(_gNorm(nomes[n]));
+    var els = dlg.querySelectorAll('button, [role="tab"], [role="button"], [role="option"], li, a, div, span');
+    var melhor = null, melhorArea = Infinity;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!_gVisivel(el)) continue;
+      var t = _gNorm(_gTxt(el));
+      if (alvos.indexOf(t) < 0) continue;
+      var r = el.getBoundingClientRect();
+      var area = r.width * r.height;
+      if (area > 0 && area < melhorArea) { melhor = el; melhorArea = area; }
+    }
+    if (!melhor) return null;
+    // Subir ate algo clicavel, sem sair do rotulo
+    var clicavel = melhor;
+    for (var d = 0; d < 3 && clicavel.parentElement; d++) {
+      var tag = clicavel.tagName.toLowerCase();
+      if (tag === 'button' || tag === 'a' || tag === 'li' ||
+          clicavel.getAttribute('role') === 'tab' || clicavel.getAttribute('role') === 'button') break;
+      clicavel = clicavel.parentElement;
+    }
+    _pointerClick(clicavel);
+    return _gTxt(melhor);
+  }
+
+  function _gDump(dlg) {
+    if (!dlg) return { dialogo: false };
+    var linhas = _gLinhas(dlg).map(function(l) { return _gTextoDeLinha(l).substring(0, 60); });
+    var btns = [];
+    var todos = dlg.querySelectorAll('button, [role="button"]');
+    for (var i = 0; i < todos.length && btns.length < 40; i++) {
+      if (!_gVisivel(todos[i])) continue;
+      var ic = todos[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
+      btns.push({ texto: _gTxt(todos[i]).substring(0, 40), icone: ic ? _gTxt(ic) : '',
+                  desabilitado: _gDesabilitado(todos[i]) });
+    }
+    var cont = _gContainerDaLista(dlg);
+    return {
+      dialogo: true,
+      tag: dlg.tagName.toLowerCase(),
+      imgsNoDialogo: dlg.querySelectorAll('img').length,
+      containerDaLista: cont ? (cont.tagName.toLowerCase() + '.' + (cont.className || '').toString().split(' ')[0]) : null,
+      linhas: linhas,
+      botoes: btns,
+      temConfirmar: !!_gBotaoConfirmar(dlg)
+    };
+  }
+
+  // ------ dotti-gallery-tab ------
+  document.addEventListener('dotti-gallery-tab', function(e) {
+    var requestId = (e.detail && e.detail.requestId) || '';
+    var nomes = (e.detail && e.detail.nomes) || [];
+    var dlg = _gDialogo();
+    if (!dlg) { _dispatch('dotti-gallery-tab-result', { requestId: requestId, result: 'SEM_DIALOGO' }); return; }
+    var clicada = _gClicarAba(dlg, nomes);
+    if (!clicada) {
+      console.log('[DottiSlateHelper] aba nao encontrada:', nomes.join('/'));
+      _dispatch('dotti-gallery-tab-result', { requestId: requestId, result: 'ABA_NAO_ENCONTRADA', dump: _gDump(dlg) });
+      return;
+    }
+    console.log('[DottiSlateHelper] aba clicada:', clicada);
+    _dispatch('dotti-gallery-tab-result', { requestId: requestId, result: 'OK', aba: clicada });
+  });
+
+  // ------ dotti-gallery-sort (ordenar por mais antigo) ------
+  document.addEventListener('dotti-gallery-sort', function(e) {
+    var requestId = (e.detail && e.detail.requestId) || '';
+    var dlg = _gDialogo();
+    if (!dlg) { _dispatch('dotti-gallery-sort-result', { requestId: requestId, result: 'SEM_DIALOGO' }); return; }
+
+    var chaves = ['recente', 'antigo', 'recent', 'oldest', 'newest', 'novo', 'ordenar', 'sort'];
+    var btn = null;
+    var btns = dlg.querySelectorAll('button, [role="button"], mat-select, [role="combobox"]');
+    for (var i = 0; i < btns.length; i++) {
+      if (!_gVisivel(btns[i])) continue;
+      var t = _gNorm(_gTxt(btns[i]));
+      if (!t || t.length > 40) continue;
+      for (var k = 0; k < chaves.length; k++) {
+        if (t.indexOf(chaves[k]) >= 0) { btn = btns[i]; break; }
+      }
+      if (btn) break;
+    }
+
+    if (!btn) {
+      console.log('[DottiSlateHelper] dropdown de ordenacao nao encontrado');
+      _dispatch('dotti-gallery-sort-result', { requestId: requestId, result: 'SEM_DROPDOWN', dump: _gDump(dlg) });
+      return;
+    }
+
+    var atual = _gNorm(_gTxt(btn));
+    if (atual.indexOf('antigo') >= 0 || atual.indexOf('oldest') >= 0) {
+      console.log('[DottiSlateHelper] ja ordenado por mais antigo');
+      _dispatch('dotti-gallery-sort-result', { requestId: requestId, result: 'JA_ANTIGO' });
+      return;
+    }
+
+    console.log('[DottiSlateHelper] abrindo ordenacao:', _gTxt(btn));
+    _pointerClick(btn);
+
+    setTimeout(function() {
+      var ops = document.querySelectorAll(
+        '[role="menuitem"], [role="option"], [role="menuitemradio"], mat-option, button.mat-mdc-menu-item');
+      var listadas = [], escolhida = null;
+      for (var j = 0; j < ops.length; j++) {
+        if (!_gVisivel(ops[j])) continue;
+        var t = _gTxt(ops[j]);
+        listadas.push(t);
+        var n = _gNorm(t);
+        if (!escolhida && (n.indexOf('antig') >= 0 || n.indexOf('oldest') >= 0)) escolhida = ops[j];
+      }
+      console.log('[DottiSlateHelper] opcoes de ordenacao:', listadas.join(' | '));
+
+      if (!escolhida) {
+        // Fecha o menu para nao deixar overlay aberto por cima da janela
+        try { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (err) {}
+        _dispatch('dotti-gallery-sort-result',
+          { requestId: requestId, result: 'SEM_OPCAO_ANTIGO', opcoes: listadas });
+        return;
+      }
+
+      console.log('[DottiSlateHelper] ordenando por:', _gTxt(escolhida));
+      _pointerClick(escolhida);
+      _dispatch('dotti-gallery-sort-result',
+        { requestId: requestId, result: 'OK', opcoes: listadas, escolhida: _gTxt(escolhida) });
+    }, 900);
+  });
+
+  // ------ dotti-gallery-list (snapshot dos titulos) ------
+  document.addEventListener('dotti-gallery-list', function(e) {
+    var requestId = (e.detail && e.detail.requestId) || '';
+    var limite = (e.detail && e.detail.limite) || 300;
+    var dlg = _gDialogo();
+    if (!dlg) { _dispatch('dotti-gallery-list-result', { requestId: requestId, result: 'SEM_DIALOGO' }); return; }
+    var itens = _gEnumerar(dlg, limite);
+    var titulos = itens.map(function(i) { return i.titulo; });
+    console.log('[DottiSlateHelper] itens na lista:', titulos.length);
+    _dispatch('dotti-gallery-list-result',
+      { requestId: requestId, result: titulos.length ? 'OK' : 'LISTA_VAZIA', titulos: titulos });
+  });
+
+  // ------ dotti-gallery-pick (achar por titulo, selecionar e INCLUIR) ------
+  document.addEventListener('dotti-gallery-pick', function(e) {
+    var requestId = (e.detail && e.detail.requestId) || '';
+    var titulo = (e.detail && e.detail.titulo) || '';
+    var alvo = _gNorm(titulo);
+
+    var dlg = _gDialogo();
+    if (!dlg) { _dispatch('dotti-gallery-pick-result', { requestId: requestId, result: 'SEM_DIALOGO' }); return; }
+    if (!alvo) { _dispatch('dotti-gallery-pick-result', { requestId: requestId, result: 'SEM_TITULO' }); return; }
+
+    var itens = _gEnumerar(dlg, 300);
+    var linha = null;
+    for (var i = 0; i < itens.length; i++) {
+      if (_gNorm(itens[i].titulo) === alvo) { linha = itens[i]; break; }
+    }
+    // Titulo truncado com reticencias: casa por prefixo, nunca por semelhanca.
+    if (!linha) {
+      var base = alvo.replace(/[.…]+$/, '');
+      if (base.length >= 8) {
+        for (var p = 0; p < itens.length; p++) {
+          var cand = _gNorm(itens[p].titulo).replace(/[.…]+$/, '');
+          if (cand.indexOf(base) === 0 || base.indexOf(cand) === 0) { linha = itens[p]; break; }
+        }
+      }
+    }
+
+    if (!linha) {
+      console.log('[DottiSlateHelper] titulo nao encontrado na lista:', titulo);
+      _dispatch('dotti-gallery-pick-result', {
+        requestId: requestId, result: 'TITULO_NAO_ENCONTRADO',
+        titulos: itens.map(function(i) { return i.titulo; })
+      });
+      return;
+    }
+
+    _pointerClick(linha.el);
+
+    // Esperar o botao de incluir ficar disponivel (ele so habilita com item selecionado)
+    var orcamento = 4000;
+    (function esperar() {
+      var btn = _gBotaoConfirmar(dlg);
+      if (btn && !_gDesabilitado(btn)) {
+        console.log('[DottiSlateHelper] incluindo no comando:', linha.titulo.substring(0, 50));
+        _pointerClick(btn);
+        _dispatch('dotti-gallery-pick-result',
+          { requestId: requestId, result: 'OK', titulo: linha.titulo, botao: _gTxt(btn) });
+        return;
+      }
+      orcamento -= 250;
+      if (orcamento <= 0) {
+        console.log('[DottiSlateHelper] botao de incluir indisponivel');
+        _dispatch('dotti-gallery-pick-result', {
+          requestId: requestId,
+          result: btn ? 'BOTAO_DESABILITADO' : 'SEM_BOTAO_INCLUIR',
+          titulo: linha.titulo, dump: _gDump(dlg)
+        });
+        return;
+      }
+      setTimeout(esperar, 250);
+    })();
+  });
+
+  // ------ dotti-gallery-dump (diagnostico; sai sozinho em qualquer falha) ------
+  document.addEventListener('dotti-gallery-dump', function(e) {
+    var requestId = (e.detail && e.detail.requestId) || '';
+    var info = _gDump(_gDialogo());
+    info.requestId = requestId;
+    console.log('[DottiSlateHelper] DUMP da janela de recursos:', JSON.stringify(info));
+    _dispatch('dotti-gallery-dump-result', info);
+  });
+
+  // ------ dotti-gallery-cancel (fechar sem incluir) ------
+  document.addEventListener('dotti-gallery-cancel', function(e) {
+    var requestId = (e.detail && e.detail.requestId) || '';
+    var dlg = _gDialogo();
+    if (!dlg) { _dispatch('dotti-gallery-cancel-result', { requestId: requestId, result: 'SEM_DIALOGO' }); return; }
+    var btns = dlg.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      var ic = btns[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
+      var t = ic ? _gTxt(ic) : '';
+      if (t === 'close' || t === 'clear') {
+        _pointerClick(btns[i]);
+        _dispatch('dotti-gallery-cancel-result', { requestId: requestId, result: 'OK', via: t });
+        return;
+      }
+    }
+    try { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (err) {}
+    _dispatch('dotti-gallery-cancel-result', { requestId: requestId, result: 'OK', via: 'escape' });
+  });
+
   function _dispatch(eventName, detail) {
     document.dispatchEvent(new CustomEvent(eventName, { detail: detail }));
   }
 
-  console.log('[DottiSlateHelper] v3.0.0 ativo');
+  console.log('[DottiSlateHelper] v4.4.0 ativo (galeria por titulo)');
 })();
