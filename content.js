@@ -1149,6 +1149,10 @@
                 while (Date.now() < limite2 && !isPromptInputEmpty()) await sleep(200);
             }
 
+            // v4.4.2: ate aqui "enviados" so subia se o parser do YhhmEf achasse
+            // o PROMPT NNN — por isso o resumo dizia enviados=0 com 7 prompts
+            // enviados. Agora conta o envio que de fato aconteceu.
+            _enviadosNaExecucao.add(prompt.number);
             console.log('[Dotti] envio #' + prompt.number + ' levou ' +
                 ((Date.now() - _t0Envio) / 1000).toFixed(1) + 's');
             console.log("[Dotti DOM] PROMPT", prompt.number, "executado com SUCESSO");
@@ -1597,6 +1601,22 @@
         _levarGradeAoTopo('periodica');
     }
 
+    // Cada RE-tentativa pede uma URL NOVA (repetir a mesma URL assinada tres
+    // vezes nao teria como dar certo). Mas na PRIMEIRA usamos a que o as29s da
+    // pagina ja entregou: v4.4.2 — ela chega valida e assinada, e pedir de novo
+    // so acrescenta um ponto de falha.
+    const _VALIDADE_URL_MS = 3600000; // 1h; a assinatura dura ~6h
+    async function _urlDaTentativa(item) {
+        if (item.tentativas === 0) {
+            const guardada = _urlAssinadaPorId.get(item.mediaId);
+            if (guardada && guardada.url && (Date.now() - guardada.at) < _VALIDADE_URL_MS) {
+                console.log('[Dotti] usando a URL que o as29s ja trouxe (#' + item.promptNumber + ')');
+                return guardada.url;
+            }
+        }
+        return await _pedirUrlAssinada(item.mediaId);
+    }
+
     async function _bombearFilaDownload() {
         if (_bombeandoFila) return;
         _bombeandoFila = true;
@@ -1608,10 +1628,7 @@
 
                 _downloadEmVoo.add(item.promptNumber);
                 try {
-                    // Cada tentativa pede uma URL NOVA (o _pedirUrlAssinada
-                    // sempre dispara o as29s de novo): repetir a mesma URL
-                    // assinada tres vezes nao teria como dar certo.
-                    const url = await _pedirUrlAssinada(item.mediaId);
+                    const url = await _urlDaTentativa(item);
                     _ultimaUrlTentada = url || null;
                     if (!url) throw new Error('sem URL assinada');
 
@@ -1730,7 +1747,15 @@
         // Se o Flow pediu a URL assinada daquela midia, o video esta pronto.
         document.addEventListener('dotti-flow-url', (e) => {
             const d = e.detail || {};
-            if (!d.mediaId) return;
+            if (!d.mediaId) {
+                // v4.4.2: isto saia calado e engolia a execucao inteira — sem
+                // mediaId nada e amarrado, o slot nunca libera e no fim tudo
+                // vira "nao gerado" mesmo com os videos prontos no Flow.
+                console.warn('[Dotti] as29s SEM mediaId' +
+                    (d.promptNumber ? ' (prompt #' + d.promptNumber + ')' : '') +
+                    (d.url ? ' — a URL veio, o id nao: ' + String(d.url).substring(0, 80) : ' — sem URL'));
+                return;
+            }
             _as29sRecebidos.add(d.mediaId);
             if (d.url) _urlAssinadaPorId.set(d.mediaId, { url: d.url, at: Date.now() });
             if (!d.promptNumber) {
@@ -6505,7 +6530,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.4.1 ready (personagem fixo: selecao confirmada)");
+        console.log("[Lets Automate] v4.4.2 ready (as29s: mediaId pela URL)");
     }
 
     if (document.readyState === "loading") {

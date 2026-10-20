@@ -537,13 +537,25 @@
         mVideo = null;
       }
       if (mVideo) {
+        // v4.4.2: o mediaId vinha SO dos argumentos da requisicao. Quando o
+        // as29s parte da pagina (e nao do nosso dotti-pedir-url), esses
+        // argumentos nao trazem uuid nenhum — dai "midias=0" e o evento saindo
+        // com mediaId null, que o content.js descartava calado. O id esta no
+        // caminho da propria URL assinada, que acabamos de extrair e validar.
+        var doCaminho = _DOTTI_RE_UUID_PATH.exec(mVideo[0]);
+        var mediaId = (doCaminho && doCaminho[1].toLowerCase()) || idsUrl[0] || null;
+        var viaId = doCaminho ? 'url' : (idsUrl[0] ? 'args' : 'nenhuma');
+        console.log('[Dotti] as29s: mediaId=' +
+          (mediaId ? mediaId.substring(0, 12) : 'NENHUM') + ' (via=' + viaId + ')');
         document.dispatchEvent(new CustomEvent('dotti-flow-url', {
           detail: {
-            mediaId: idsUrl[0] || null,
+            mediaId: mediaId,
             url: mVideo[0],
             promptNumber: mNumUrl ? Number(mNumUrl[1]) : null
           }
         }));
+      } else {
+        console.warn('[Dotti] as29s sem URL de video no payload — nada a baixar');
       }
     }
 
@@ -554,6 +566,18 @@
     if (ids.indexOf('YhhmEf') !== -1) {
       var argsEnvio = _dottiArgsDoRpc(corpoReq, 'YhhmEf') || '';
       var mNum = argsEnvio.match(_DOTTI_RE_PROMPT_NUM);
+      // v4.4.2: se os argumentos nao trouxeram o nosso "PROMPT NNN" mas a
+      // requisicao carrega UM rpc so, o corpo inteiro e inequivoco — nao ha
+      // outro RPC junto para contaminar a leitura.
+      if (!mNum && ids.length === 1) {
+        // O corpo chega URL-encoded: sem decodificar, "PROMPT 77" vira
+        // "PROMPT%2077" e o regex nao casa.
+        var cru = String(corpoReq || '');
+        var decodificado = cru;
+        try { decodificado = decodeURIComponent(cru.replace(/\+/g, ' ')); } catch (e) { }
+        mNum = decodificado.match(_DOTTI_RE_PROMPT_NUM);
+        if (mNum) console.log('[Dotti] YhhmEf: PROMPT lido do corpo (rpc unico)');
+      }
       var uuidsEnvio = _dottiUuidsDe(_dottiPayloadsDoRpc(blocos, 'YhhmEf').join(' '));
       console.log('[Dotti] rpc=YhhmEf midias=' + uuidsEnvio.length +
         (mNum ? ' prompt=#' + mNum[1] : ' prompt=?') + ' (observacao)');
@@ -812,5 +836,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v4.2.0 ativo (payload desescapado)');
+  console.log('[DottiInterceptor] v4.4.2 ativo (mediaId pela URL do as29s)');
 })();
