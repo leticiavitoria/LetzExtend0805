@@ -216,6 +216,37 @@
             console.log("[Dotti DOM] Switch mode result:", JSON.stringify(result));
 
             if (result.result === 'OK' || result.result === 'ALREADY_ACTIVE') {
+                // v4.4.3: a duracao agora volta conferida. Antes o popup dizia
+                // OK mesmo sem achar o botao de 8s, o modo ficava memorizado
+                // como se tivesse sido aplicado, e os prompts seguintes
+                // pulavam o popup — o video ficava preso na duracao do
+                // primeiro prompt. Era esse o bug.
+                const dur = result.duracao || {};
+                const duracaoOk = (dur.aplicada === true);
+                // "Nao consigo ler o estado" nao e o mesmo que "sei que esta
+                // errado". No segundo caso nao envio — video com duracao errada
+                // gasta credito. No primeiro o botao certo FOI clicado (e tudo
+                // o que da para fazer), entao envio, mas nunca memorizo: o
+                // popup roda de novo no proximo prompt.
+                const ilegivel = (dur.via === 'estado_indeterminado');
+
+                if (!duracaoOk && !ilegivel) {
+                    _modoAplicado = null;
+                    console.warn('[Dotti DOM] duracao ' + _duracaoAlvo + 's NAO aplicada (' +
+                        (dur.via || 'sem resposta') + '; ativa: ' + (dur.ativa || 'indeterminada') +
+                        '; visiveis: ' + ((dur.visiveis || []).join(',') || 'nenhuma') +
+                        ') — prompt nao sera enviado');
+                    return false;
+                }
+
+                if (ilegivel) {
+                    _modoAplicado = null;
+                    console.warn('[Dotti DOM] duracao ' + _duracaoAlvo + 's clicada mas o estado dos ' +
+                        'botoes e ilegivel — envio assim e revalido no proximo prompt');
+                    if (_firstPromptOfSession) _firstPromptOfSession = false;
+                    return true;
+                }
+
                 if (_firstPromptOfSession) _firstPromptOfSession = false;
                 // So memoriza quando deu certo de verdade. Se algum alvo nao foi
                 // encontrado, o modo pode nao estar como pedimos — nao guardar.
@@ -228,13 +259,16 @@
                     _modoAplicado = _assinaturaModo;
                     _envriosDesdeRevalidacao = 0;
                 }
-                console.log("[Dotti DOM] Modo trocado com sucesso: media=" + mediaTypeTarget + " sub=" + subMode);
+                console.log('[Dotti DOM] modo OK: media=' + mediaTypeTarget + ' sub=' + subMode +
+                    ' duracao=' + _duracaoAlvo + 's (' + dur.via + ')');
                 return true;
             }
 
-            _modoAplicado = null;   // falhou: proximo prompt revalida
-            console.log("[Dotti DOM] AVISO: Falha ao mudar modo via MAIN world —", result.result);
-            return true;
+            // v4.4.3: isto devolvia true e o prompt era enviado com o modo
+            // que estivesse na tela. Falhou e falha.
+            _modoAplicado = null;
+            console.warn('[Dotti DOM] falha ao trocar modo via MAIN world — ' + result.result);
+            return false;
         }
 
         // Tabs visiveis — usar abordagem direta
@@ -3514,6 +3548,17 @@
                 console.log('[Dotti] Loop #' + _loopIteration + ': pending=' + pending + ' gen=' + generating +
                     ' failed=' + failed + ' complete=' + complete + ' slots=' + slotsUsed + '/' + _slots.length +
                     ' errors=' + _consecutiveErrorCount + ' rewrites=' + _pendingRewrites);
+                // v4.4.3: o lado do download na mesma linha. Sem isto, "nao esta
+                // baixando" exige adivinhar em qual elo parou; com isto a
+                // propria linha diz: se as29s=0 o sinal nao chega; se fila cresce
+                // e baixados nao, o problema e no download em si.
+                console.log('[Dotti Download] as29s=' + _as29sRecebidos.size +
+                    ' urls=' + _urlAssinadaPorId.size +
+                    ' amarrados=' + _idParaPrompt.size +
+                    ' fila=' + _filaDownload.length +
+                    ' emVoo=' + _downloadEmVoo.size +
+                    ' baixados=' + _promptList.filter(p => p.downloaded).length +
+                    ' bloqueados=' + _promptsBloqueados.size);
             }
 
             // Verifica se ha slots disponiveis
@@ -6530,7 +6575,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.4.2 ready (as29s: mediaId pela URL)");
+        console.log("[Lets Automate] v4.4.3 ready (duracao conferida)");
     }
 
     if (document.readyState === "loading") {
