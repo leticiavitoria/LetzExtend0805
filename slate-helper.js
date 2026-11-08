@@ -754,6 +754,9 @@
     var setX1 = !!(e.detail && e.detail.setX1);
     var duration = (e.detail && e.detail.duration) || null;   // 4 | 6 | 8
     var modeloAlvo = (e.detail && e.detail.modelo) || null;   // ex: 'Veo 3.1 - Lite [Lower Priority]'
+    // v4.5.0: clicar numa aba fecha o popup. So clicamos quando o modo mudou
+    // ou na revalidacao periodica (o content.js decide).
+    var clicarAbas = !(e.detail && e.detail.abas === false);
 
     // Build list of icons to click. Cada entrada eh uma lista de alternativas
     // (Flow renomeou videocam -> play_circle em maio/2026).
@@ -857,8 +860,17 @@
       console.log('[DottiSlateHelper] botoes com o popup aberto:', btnList.join(', '));
 
       // ---- 2. abas (video/imagem, frames/elementos) ----
+      // O rotulo ja diz se esta em Video: nesse caso a aba de video nao
+      // precisa de clique (cada clique fecha o popup).
+      var rotuloAgora = _sdResumo() || '';
+      var jaEmVideo = /v[ií]deo|video/i.test(rotuloAgora);
       for (var t = 0; t < targets.length; t++) {
         var targetAlts = targets[t];
+        if (!clicarAbas) { clickResults.push({ icon: targetAlts[0], action: 'skipped' }); continue; }
+        if (mediaType === 'video' && targetAlts.indexOf('videocam') >= 0 && jaEmVideo) {
+          clickResults.push({ icon: 'videocam', action: 'already_active' });
+          continue;
+        }
         var targetIcon = targetAlts[0];
         var targetBtn = null, fallbackBtn = null, matchedIcon = null;
         var atuais = Array.from(document.querySelectorAll('button')).filter(function (b) { return b.offsetParent !== null; });
@@ -889,6 +901,7 @@
       // "aberto", e 400ms depois a duracao tinha sumido — era esse o
       // "visiveis=(nenhuma)" com o popup supostamente aberto. Agora esperamos
       // assentar e REABRIMOS se precisar.
+      var algumaAbaClicada = clickResults.some(function (c) { return c.action === 'clicked'; });
       setTimeout(function () {
       abrirPopup(function (voltou) {
         if (!voltou) {
@@ -909,7 +922,7 @@
         }
         passoModelo();
       });
-      }, 700);
+      }, algumaAbaClicada ? 700 : 0);
     });
 
     // ---- 3. modelo de geracao ----
@@ -1971,5 +1984,5 @@
     document.dispatchEvent(new CustomEvent(eventName, { detail: detail }));
   }
 
-  console.log('[DottiSlateHelper] v4.4.5 ativo (popup reaberto a cada etapa)');
+  console.log('[DottiSlateHelper] v4.5.0 ativo (menos cliques no popup)');
 })();

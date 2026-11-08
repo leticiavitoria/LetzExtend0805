@@ -508,6 +508,56 @@
   // payload e o PROMPT NNN vinha do payload inteiro (uma listagem traz o texto
   // de TODOS os prompts). Nao se interpreta campo numerico sem saber de qual
   // RPC veio e onde ele fica.
+  // v4.5.0: o mediaId do payload novo do as29s e o primeiro elemento do array,
+  // e so vale se for um uuid de verdade. Nada de posicao "no chute": o array
+  // tem de parsear, o [0] tem de ser uuid, e o mesmo payload tem de trazer o
+  // PROMPT NNN (quem confere isso e quem chama).
+  var _DOTTI_RE_UUID_EXATO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  function _dottiMidiaDoPayload(texto) {
+    try {
+      var v = JSON.parse(texto);
+      if (Array.isArray(v) && typeof v[0] === 'string' && _DOTTI_RE_UUID_EXATO.test(v[0])) {
+        return v[0].toLowerCase();
+      }
+    } catch (e) { }
+    return null;
+  }
+
+  // v4.5.0: a URL assinada saiu do as29s. Se o Google so a mudou de RPC, ela
+  // aparece aqui sem nenhum clique nosso — e o id vem do proprio caminho da
+  // URL, entao a identidade nao depende de qual RPC a trouxe.
+  var _dottiRpcsComUrl = {};
+  function _dottiVarrerUrlsAssinadas(ids, blocos) {
+    for (var r = 0; r < ids.length; r++) {
+      if (ids[r] === 'as29s') continue;
+      var pls = _dottiPayloadsDoRpc(blocos, ids[r]);
+      for (var p = 0; p < pls.length; p++) {
+        var txt = _dottiDesescapar(pls[p]);
+        if (txt.indexOf('flow-content.google/video/') === -1) continue;
+        var urls = txt.match(/https:\/\/flow-content\.google\/video\/[^"'\\\s]+/g) || [];
+        var num = txt.match(_DOTTI_RE_PROMPT_NUM);
+        for (var u = 0; u < urls.length; u++) {
+          if (urls[u].indexOf('Signature=') === -1) continue;
+          var cam = _DOTTI_RE_UUID_PATH.exec(urls[u]);
+          if (!cam) continue;
+          if (!_dottiRpcsComUrl[ids[r]]) {
+            _dottiRpcsComUrl[ids[r]] = true;
+            console.log('[Dotti] URL assinada encontrada no rpc=' + ids[r] + ' (fora do as29s)');
+          }
+          document.dispatchEvent(new CustomEvent('dotti-flow-url', {
+            detail: {
+              mediaId: cam[1].toLowerCase(),
+              url: urls[u],
+              // o PROMPT so amarra se o payload tiver UMA url — senao seria chute
+              promptNumber: (num && urls.length === 1) ? Number(num[1]) : null,
+              via: ids[r]
+            }
+          }));
+        }
+      }
+    }
+  }
+
   var _DOTTI_USAR_JWPDUF = false;
 
   function _dottiProcessarRpc(url, corpoReq, textoResp) {
@@ -516,6 +566,7 @@
     _dottiGuardarAt(corpoReq);
 
     var blocos = _dottiBlocosDaResposta(textoResp);
+    try { _dottiVarrerUrlsAssinadas(ids, blocos); } catch (e) { }
 
     // ---- URL ASSINADA (as29s) — fonte unica de identidade e de "pronto" ----
     // No log dela acerta 100%: mediaId no argumento, o MESMO mediaId no caminho
@@ -555,11 +606,32 @@
           }
         }));
       } else {
-        // v4.4.5: sem a URL nao ha download, e ate aqui o log nao dizia o que
-        // a resposta TRAZIA. Um trecho do payload responde isso no proximo log,
-        // sem mais uma rodada de adivinhacao.
-        console.warn('[Dotti] as29s sem URL de video no payload — nada a baixar. Payload: ' +
-          plUrl.substring(0, 300));
+        // v4.5.0: o as29s MUDOU. O log dela mostrou o payload novo:
+        //   ["<mediaId>","<projeto>","<outro id>",null,null,[[ts],"PROMPT 4: ..."]]
+        // Nao traz mais URL — traz a midia e o NOSSO texto na mesma resposta.
+        // O primeiro uuid bate com o erro do Angular logo apos cada envio
+        // (Ke`9c32cd0d... -> prompt 14; Ke`ec54bded... -> prompt 16), e o do
+        // meio se repete em todos (e o projeto). Entao a identidade continua
+        // exata, numa transacao so: so o download precisa de outro caminho.
+        var plsAs = _dottiPayloadsDoRpc(blocos, 'as29s');
+        var algum = false;
+        for (var pa = 0; pa < plsAs.length; pa++) {
+          var txtAs = _dottiDesescapar(plsAs[pa]);
+          var idM = _dottiMidiaDoPayload(txtAs);
+          var nM = txtAs.match(_DOTTI_RE_PROMPT_NUM);
+          if (idM && nM) {
+            algum = true;
+            console.log('[Dotti] as29s: midia=' + idM.substring(0, 12) + ' -> #' + nM[1] +
+              ' (sem URL no as29s: so identidade)');
+            document.dispatchEvent(new CustomEvent('dotti-flow-midia', {
+              detail: { mediaId: idM, promptNumber: Number(nM[1]) }
+            }));
+          }
+        }
+        if (!algum) {
+          console.warn('[Dotti] as29s sem URL e sem identidade reconhecivel. Payload: ' +
+            plUrl.substring(0, 300));
+        }
       }
     }
 
@@ -840,5 +912,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v4.4.5 ativo (mediaId pela URL do as29s)');
+  console.log('[DottiInterceptor] v4.5.0 ativo (as29s novo: identidade; URL em qualquer rpc)');
 })();
