@@ -585,6 +585,120 @@
     _dispatch('dotti-gallery-debug-result', info);
   });
 
+  // textContent cola o nome do icone no rotulo ("Veo 3.1 - Litearrow_drop_down"),
+  // porque a ligadura do mat-icon E texto. Entao ignoramos os nos de icone em
+  // vez de tentar remover a palavra depois.
+  function _sdTexto(el) {
+    if (!el) return '';
+    var partes = [];
+    (function anda(n) {
+      for (var i = 0; i < n.childNodes.length; i++) {
+        var c = n.childNodes[i];
+        if (c.nodeType === 3) {
+          var t = (c.nodeValue || '').replace(/\s+/g, ' ').trim();
+          if (t) partes.push(t);
+        } else if (c.nodeType === 1) {
+          var tag = c.tagName.toLowerCase();
+          var cls = (c.className || '').toString();
+          if (tag === 'mat-icon' || tag === 'i' ||
+              cls.indexOf('material-icons') >= 0 || cls.indexOf('material-symbols') >= 0 ||
+              cls.indexOf('google-symbols') >= 0) continue;
+          anda(c);
+        }
+      }
+    })(el);
+    return partes.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function _sdVisivel(el) {
+    return !!(el && el.offsetParent !== null);
+  }
+
+  function _sdEsperar(cond, ms, cb) {
+    var restante = ms;
+    (function tick() {
+      var r = false;
+      try { r = !!cond(); } catch (e) { r = false; }
+      if (r) { cb(true); return; }
+      restante -= 150;
+      if (restante <= 0) { cb(false); return; }
+      setTimeout(tick, 150);
+    })();
+  }
+
+  // O gatilho das configuracoes. A classe vem do DOM real do Flow; o icone
+  // continua como reserva.
+  function _sdBotaoConfig() {
+    var b = document.querySelector('button.settings-trigger-button');
+    if (_sdVisivel(b)) return b;
+    var todos = Array.from(document.querySelectorAll('button')).filter(_sdVisivel);
+    for (var i = 0; i < todos.length; i++) {
+      var ic = todos[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
+      if (!ic) continue;
+      var t = ic.textContent.trim();
+      if (t === 'crop_16_9' || t === 'crop_9_16') return todos[i];
+    }
+    return null;
+  }
+
+  // "Video · 720p · 6s crop_16_9 x1" — o estado inteiro em uma string.
+  function _sdResumo() {
+    var b = _sdBotaoConfig();
+    if (!b) return null;
+    return _sdTexto(b.querySelector('.settings-summary') || b);
+  }
+
+  function _sdDuracaoDoResumo(resumo) {
+    var m = (resumo || '').match(/(\d+)\s*s(?:\b|$)/);
+    return m ? (m[1] + 's') : null;
+  }
+
+  // O popup esta aberto quando os botoes de duracao existem na tela.
+  function _sdPopupAberto() {
+    return Object.keys(_sdBotoesDeDuracao()).length >= 2;
+  }
+
+  var _SD_RE_MODELO = /\b(veo|omni)\b/i;
+
+  // O seletor de modelo: o controle do popup cujo texto nomeia um modelo.
+  function _sdControleDeModelo() {
+    var cands = Array.from(document.querySelectorAll(
+      'button, [role="button"], [role="combobox"], mat-select')).filter(_sdVisivel);
+    var melhor = null;
+    for (var i = 0; i < cands.length; i++) {
+      var t = _sdTexto(cands[i]);
+      if (!t || t.length > 60) continue;
+      if (!_SD_RE_MODELO.test(t)) continue;
+      // o controle e o menor elemento que nomeia o modelo (evita pegar um pai)
+      if (!melhor || t.length < _sdTexto(melhor).length) melhor = cands[i];
+    }
+    return melhor;
+  }
+
+  function _sdOpcoesDeModelo() {
+    var ops = Array.from(document.querySelectorAll(
+      '[role="menuitem"], [role="option"], [role="menuitemradio"], mat-option, button.mat-mdc-menu-item'))
+      .filter(_sdVisivel);
+    return ops.filter(function (o) { return _SD_RE_MODELO.test(_sdTexto(o)); });
+  }
+
+  // Comparacao de modelo: normaliza e exige igualdade do nome, nunca
+  // "parecido" — "Lite" e "Lite [Lower Priority]" sao modelos diferentes e
+  // custam creditos diferentes.
+  function _sdNormModelo(s) {
+    return (s || '').toString().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[\[\]()]/g, ' ')
+      .replace(/disponivel ate.*$/, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  function _sdMesmoModelo(a, b) {
+    var na = _sdNormModelo(a), nb = _sdNormModelo(b);
+    return !!na && !!nb && na === nb;
+  }
+
   // v4.4.3: estado de um botao sem depender de data-state. No Flow Angular o
   // data-state nao existe mais (o log dela repete "was null" em todo clique),
   // entao a duracao era "setada" sem nunca ser conferida.
@@ -639,6 +753,7 @@
     var subMode = (e.detail && e.detail.mode) || null;        // 'ingredients' or 'frames'
     var setX1 = !!(e.detail && e.detail.setX1);
     var duration = (e.detail && e.detail.duration) || null;   // 4 | 6 | 8
+    var modeloAlvo = (e.detail && e.detail.modelo) || null;   // ex: 'Veo 3.1 - Lite [Lower Priority]'
 
     // Build list of icons to click. Cada entrada eh uma lista de alternativas
     // (Flow renomeou videocam -> play_circle em maio/2026).
@@ -655,178 +770,288 @@
 
     console.log('[DottiSlateHelper] switchMode: mediaType=' + mediaType + ' subMode=' + subMode + ' targets=' + targets.join(','));
 
-    // Find crop_16_9 button (mode selector trigger at bottom of creation area)
-    var allBtns = Array.from(document.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
-    var cropBtn = null;
-    for (var i = 0; i < allBtns.length; i++) {
-      // v3.3.0: no Flow Angular os icones sao <mat-icon>, nao <i>. O crop_16_9
-      // existia na pagina o tempo todo — a busca e que olhava a tag errada.
-      var icon = allBtns[i].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
-      if (icon && (icon.textContent.trim() === 'crop_16_9' || icon.textContent.trim() === 'crop_9_16')) {
-        cropBtn = allBtns[i];
-        break;
-      }
-    }
-
-    if (!cropBtn) {
-      console.log('[DottiSlateHelper] crop_16_9/crop_9_16 not found for mode switch');
+    // v4.4.4: o gatilho certo e o botao de configuracoes, nao "um botao com
+    // icone crop_16_9" — o crop_16_9 vive DENTRO do rotulo dele, e o popup
+    // tambem tem botoes com esse icone (16:9 / 9:16). E o rotulo desse botao
+    // carrega o estado inteiro: "Video · 720p · 6s [crop_16_9] x1". E a fonte
+    // de verdade mais confiavel que existe aqui, e e por ela que conferimos.
+    var cfgBtn = _sdBotaoConfig();
+    if (!cfgBtn) {
+      console.warn('[DottiSlateHelper] botao de configuracoes nao encontrado');
       _dispatch('dotti-switch-mode-result', { requestId: requestId, result: 'NO_CROP_BTN' });
       return;
     }
 
-    // Open mode selector
-    console.log('[DottiSlateHelper] Opening mode selector...');
-    _pointerClick(cropBtn);
+    var resumoInicial = _sdResumo();
+    console.log('[DottiSlateHelper] configuracoes atuais: "' + (resumoInicial || '(ilegivel)') + '"');
 
-    // Wait for tabs to appear
-    setTimeout(function() {
-      var refreshedBtns = Array.from(document.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
+    var duracaoInfo = { pedida: duration || null, aplicada: null, via: null, visiveis: [], ativa: null };
+    var modeloInfo = { pedido: modeloAlvo || null, aplicado: null, via: null, atual: null, opcoes: [] };
+    var clickResults = [];
 
-      // Debug: list visible buttons
-      var btnList = [];
-      for (var d = 0; d < refreshedBtns.length; d++) {
-        var di = refreshedBtns[d].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
-        if (di) btnList.push(di.textContent.trim() + '(' + (refreshedBtns[d].getAttribute('data-state') || '') + ')');
+    function terminar(resultado) {
+      _dispatch('dotti-switch-mode-result', {
+        requestId: requestId,
+        result: resultado || 'OK',
+        mediaType: mediaType,
+        mode: subMode,
+        clicks: clickResults,
+        x1Set: setX1,
+        duracao: duracaoInfo,
+        modelo: modeloInfo,
+        resumo: _sdResumo()
+      });
+    }
+
+    // ---- 1. garantir o popup ABERTO (antes era um setTimeout fixo de 1500ms,
+    // e o clique no gatilho ALTERNA: se ja estivesse aberto, nos fechavamos) ----
+    function abrirPopup(cb) {
+      if (_sdPopupAberto()) { console.log('[DottiSlateHelper] popup ja estava aberto'); cb(true); return; }
+      console.log('[DottiSlateHelper] abrindo configuracoes...');
+      _pointerClick(cfgBtn);
+      _sdEsperar(_sdPopupAberto, 3000, function (ok) {
+        if (!ok) {
+          // Pode ter alternado para fechado: tenta mais uma vez.
+          console.log('[DottiSlateHelper] popup nao apareceu; segunda tentativa');
+          _pointerClick(cfgBtn);
+          _sdEsperar(_sdPopupAberto, 3000, cb);
+          return;
+        }
+        cb(true);
+      });
+    }
+
+    function fecharPopup(cb) {
+      if (!_sdPopupAberto()) { cb(); return; }
+      console.log('[DottiSlateHelper] fechando configuracoes');
+      _pointerClick(cfgBtn);
+      _sdEsperar(function () { return !_sdPopupAberto(); }, 2000, function () { setTimeout(cb, 300); });
+    }
+
+    abrirPopup(function (aberto) {
+      if (!aberto) {
+        console.warn('[DottiSlateHelper] popup de configuracoes NAO abriu');
+        duracaoInfo.aplicada = false;
+        duracaoInfo.via = 'popup_nao_abriu';
+        // O rotulo continua legivel com o popup fechado: se a duracao ja for a
+        // pedida, o envio nao precisa ser bloqueado por causa do popup.
+        var noRotulo = _sdDuracaoDoResumo(_sdResumo());
+        if (noRotulo && duration && noRotulo === (duration + 's')) {
+          duracaoInfo.ativa = noRotulo;
+          duracaoInfo.aplicada = true;
+          duracaoInfo.via = 'rotulo_ja_correto';
+          console.log('[DottiSlateHelper] mas o rotulo ja diz ' + noRotulo + ' — segue');
+          terminar('OK');
+          return;
+        }
+        terminar('POPUP_NAO_ABRIU');
+        return;
       }
-      console.log('[DottiSlateHelper] Buttons after open:', btnList.join(', '));
 
-      // Click each target tab sequentially
-      var clickResults = [];
-      var allAlreadyActive = true;
+      var btnList = [];
+      Array.from(document.querySelectorAll('button')).forEach(function (b) {
+        if (b.offsetParent === null) return;
+        var di = b.querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
+        if (di) btnList.push(di.textContent.trim());
+      });
+      console.log('[DottiSlateHelper] botoes com o popup aberto:', btnList.join(', '));
 
+      // ---- 2. abas (video/imagem, frames/elementos) ----
       for (var t = 0; t < targets.length; t++) {
-        var targetAlts = targets[t]; // array de alternativas (ex: ['videocam','play_circle'])
+        var targetAlts = targets[t];
         var targetIcon = targetAlts[0];
-        var targetBtn = null;
-        var fallbackBtn = null;
-        var matchedIcon = null;
-        // Preferir botoes do popup (data-state active/inactive). Outros videocam/image
-        // que aparecem em sidebar/galeria usam outros estados (closed) e devem ser ignorados.
-        for (var j = 0; j < refreshedBtns.length; j++) {
-          var ic = refreshedBtns[j].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
+        var targetBtn = null, fallbackBtn = null, matchedIcon = null;
+        var atuais = Array.from(document.querySelectorAll('button')).filter(function (b) { return b.offsetParent !== null; });
+        for (var j = 0; j < atuais.length; j++) {
+          var ic = atuais[j].querySelector('mat-icon, i, span.material-icons, span.material-symbols-outlined');
           if (!ic) continue;
           var icText = ic.textContent.trim();
           if (targetAlts.indexOf(icText) < 0) continue;
-          var st = refreshedBtns[j].getAttribute('data-state');
-          if (st === 'active' || st === 'inactive') { targetBtn = refreshedBtns[j]; matchedIcon = icText; break; }
-          if (!fallbackBtn) { fallbackBtn = refreshedBtns[j]; matchedIcon = icText; }
+          var st = atuais[j].getAttribute('data-state');
+          if (st === 'active' || st === 'inactive') { targetBtn = atuais[j]; matchedIcon = icText; break; }
+          if (!fallbackBtn) { fallbackBtn = atuais[j]; matchedIcon = icText; }
         }
         if (!targetBtn) targetBtn = fallbackBtn;
         if (matchedIcon) targetIcon = matchedIcon;
 
-        if (!targetBtn) {
-          clickResults.push({ icon: targetAlts.join('|'), action: 'not_found' });
-          allAlreadyActive = false;
-          continue;
-        }
-
-        var state = targetBtn.getAttribute('data-state');
-        if (state === 'active') {
+        if (!targetBtn) { clickResults.push({ icon: targetAlts.join('|'), action: 'not_found' }); continue; }
+        if (targetBtn.getAttribute('data-state') === 'active') {
           clickResults.push({ icon: targetIcon, action: 'already_active' });
         } else {
-          console.log('[DottiSlateHelper] Clicking', targetIcon, '(was ' + state + ')');
+          console.log('[DottiSlateHelper] clicando aba', targetIcon);
           _pointerClick(targetBtn);
-          clickResults.push({ icon: targetIcon, action: 'clicked', was: state });
-          allAlreadyActive = false;
+          clickResults.push({ icon: targetIcon, action: 'clicked' });
         }
       }
 
-      // Set x1 if requested
-      setTimeout(function() {
-        if (setX1) {
-          var btns2 = Array.from(document.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
-          for (var k = 0; k < btns2.length; k++) {
-            var txt = btns2[k].textContent.trim();
-            if (txt === 'x1' && btns2[k].getAttribute('data-state') === 'inactive') {
-              console.log('[DottiSlateHelper] Setting x1');
-              _pointerClick(btns2[k]);
-              break;
-            }
-          }
-        }
-
-        // Set video duration (4s / 6s / 8s) — Veo 3 popup
-        // v4.4.3: antes isto so logava. Quando o botao nao aparecia, o
-        // resultado saia 'OK' do mesmo jeito, o content.js memorizava a
-        // duracao como aplicada e pulava o popup nos prompts seguintes — o
-        // video ficava preso na duracao do primeiro prompt.
-        var duracaoInfo = { pedida: duration || null, aplicada: null, via: null, visiveis: [], ativa: null };
-
-        function finalizar() {
-          setTimeout(function() {
-            console.log('[DottiSlateHelper] Closing mode selector');
-            _pointerClick(cropBtn);
-            setTimeout(function() {
-              _dispatch('dotti-switch-mode-result', {
-                requestId: requestId,
-                result: 'OK',
-                mediaType: mediaType,
-                mode: subMode,
-                clicks: clickResults,
-                x1Set: setX1,
-                duracao: duracaoInfo
-              });
-            }, 1000);
-          }, 500);
-        }
-
-        if (duration !== 4 && duration !== 6 && duration !== 8) { finalizar(); return; }
-
-        var wanted = duration + 's';
-        var botoesDur = _sdBotoesDeDuracao();
-        duracaoInfo.visiveis = Object.keys(botoesDur);
-
-        if (!botoesDur[wanted]) {
+      // Clicar nas abas re-renderiza o popup: esperar ele voltar antes de mexer
+      // em modelo e duracao. Era aqui que a duracao "sumia" (visiveis=nenhuma).
+      _sdEsperar(_sdPopupAberto, 3000, function (voltou) {
+        if (!voltou) {
+          console.warn('[DottiSlateHelper] popup sumiu depois das abas');
           duracaoInfo.aplicada = false;
-          duracaoInfo.via = 'botao_ausente';
-          console.warn('[DottiSlateHelper] duracao ' + wanted + ' NAO encontrada; visiveis=' +
-            (duracaoInfo.visiveis.join(',') || '(nenhuma)'));
-          finalizar();
-          return;
-        }
-
-        var ativaAntes = _sdDuracaoAtiva(botoesDur);
-        duracaoInfo.ativa = ativaAntes;
-
-        if (ativaAntes === wanted) {
-          duracaoInfo.aplicada = true;
-          duracaoInfo.via = 'ja_ativa';
-          console.log('[DottiSlateHelper] duracao ' + wanted + ' ja estava ativa');
-          finalizar();
-          return;
-        }
-
-        console.log('[DottiSlateHelper] clicando duracao ' + wanted +
-          ' (ativa antes: ' + (ativaAntes || 'indeterminada') + ')');
-        _pointerClick(botoesDur[wanted]);
-
-        // Confirmar que pegou — nunca presumir.
-        var orcamentoDur = 2000;
-        (function conferir() {
-          var agora = _sdBotoesDeDuracao();
-          var ativa = _sdDuracaoAtiva(agora);
-          if (ativa === wanted) {
+          duracaoInfo.via = 'popup_sumiu_apos_abas';
+          var r = _sdDuracaoDoResumo(_sdResumo());
+          if (r && duration && r === (duration + 's')) {
+            duracaoInfo.ativa = r;
             duracaoInfo.aplicada = true;
-            duracaoInfo.via = 'clicada';
-            duracaoInfo.ativa = ativa;
-            console.log('[DottiSlateHelper] duracao ' + wanted + ' confirmada');
-            finalizar();
+            duracaoInfo.via = 'rotulo_ja_correto';
+            console.log('[DottiSlateHelper] mas o rotulo ja diz ' + r + ' — segue');
+            terminar('OK');
             return;
           }
-          orcamentoDur -= 250;
-          if (orcamentoDur <= 0) {
-            duracaoInfo.aplicada = false;
-            duracaoInfo.via = (ativa === null ? 'estado_indeterminado' : 'nao_confirmou');
-            duracaoInfo.ativa = ativa;
-            console.warn('[DottiSlateHelper] duracao ' + wanted + ' NAO confirmada (ativa: ' +
-              (ativa || 'indeterminada') + ')');
-            finalizar();
-            return;
+          terminar('POPUP_SUMIU');
+          return;
+        }
+        passoModelo();
+      });
+    });
+
+    // ---- 3. modelo de geracao ----
+    function passoModelo() {
+      if (!modeloAlvo) { modeloInfo.aplicado = null; modeloInfo.via = 'nao_pedido'; passoX1(); return; }
+
+      var ctrl = _sdControleDeModelo();
+      if (!ctrl) {
+        modeloInfo.aplicado = false;
+        modeloInfo.via = 'controle_nao_encontrado';
+        console.warn('[DottiSlateHelper] seletor de modelo nao encontrado');
+        passoX1();
+        return;
+      }
+
+      modeloInfo.atual = _sdTexto(ctrl);
+      if (_sdMesmoModelo(modeloInfo.atual, modeloAlvo)) {
+        modeloInfo.aplicado = true;
+        modeloInfo.via = 'ja_ativo';
+        console.log('[DottiSlateHelper] modelo ja e "' + modeloInfo.atual + '"');
+        passoX1();
+        return;
+      }
+
+      console.log('[DottiSlateHelper] trocando modelo: "' + modeloInfo.atual + '" -> "' + modeloAlvo + '"');
+      _pointerClick(ctrl);
+
+      _sdEsperar(function () { return _sdOpcoesDeModelo().length > 0; }, 3000, function (abriu) {
+        var ops = _sdOpcoesDeModelo();
+        modeloInfo.opcoes = ops.map(function (o) { return _sdTexto(o); });
+        if (!abriu || !ops.length) {
+          modeloInfo.aplicado = false;
+          modeloInfo.via = 'lista_nao_abriu';
+          console.warn('[DottiSlateHelper] lista de modelos nao abriu');
+          passoX1();
+          return;
+        }
+        console.log('[DottiSlateHelper] modelos disponiveis:', modeloInfo.opcoes.join(' | '));
+
+        var escolhido = null;
+        for (var i = 0; i < ops.length; i++) {
+          if (_sdMesmoModelo(_sdTexto(ops[i]), modeloAlvo)) { escolhido = ops[i]; break; }
+        }
+        if (!escolhido) {
+          modeloInfo.aplicado = false;
+          modeloInfo.via = 'opcao_inexistente';
+          console.warn('[DottiSlateHelper] modelo "' + modeloAlvo + '" nao esta na lista');
+          try { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (err) { }
+          setTimeout(passoX1, 400);
+          return;
+        }
+
+        _pointerClick(escolhido);
+        _sdEsperar(function () {
+          var c = _sdControleDeModelo();
+          return c && _sdMesmoModelo(_sdTexto(c), modeloAlvo);
+        }, 3000, function (confirmou) {
+          var c = _sdControleDeModelo();
+          modeloInfo.atual = c ? _sdTexto(c) : null;
+          modeloInfo.aplicado = !!confirmou;
+          modeloInfo.via = confirmou ? 'trocado' : 'nao_confirmou';
+          console.log('[DottiSlateHelper] modelo agora: "' + (modeloInfo.atual || '?') +
+            '" (' + modeloInfo.via + ')');
+          passoX1();
+        });
+      });
+    }
+
+    // ---- 4. x1 ----
+    function passoX1() {
+      if (setX1) {
+        var btns2 = Array.from(document.querySelectorAll('button')).filter(function (b) { return b.offsetParent !== null; });
+        for (var k = 0; k < btns2.length; k++) {
+          if (_sdTexto(btns2[k]) === 'x1' && btns2[k].getAttribute('data-state') !== 'active') {
+            console.log('[DottiSlateHelper] setting x1');
+            _pointerClick(btns2[k]);
+            break;
           }
-          setTimeout(conferir, 250);
-        })();
-      }, 600);
-    }, 1500);
+        }
+      }
+      setTimeout(passoDuracao, 400);
+    }
+
+    // ---- 5. duracao ----
+    function passoDuracao() {
+      if (duration !== 4 && duration !== 6 && duration !== 8) { fecharPopup(function () { terminar('OK'); }); return; }
+
+      var wanted = duration + 's';
+      var botoes = _sdBotoesDeDuracao();
+      duracaoInfo.visiveis = Object.keys(botoes);
+
+      if (!botoes[wanted]) {
+        duracaoInfo.aplicada = false;
+        duracaoInfo.via = 'botao_ausente';
+        console.warn('[DottiSlateHelper] duracao ' + wanted + ' NAO encontrada; visiveis=' +
+          (duracaoInfo.visiveis.join(',') || '(nenhuma)'));
+        // Mesmo sem achar o botao, o rotulo pode ja dizer a duracao certa —
+        // e ai nao ha nada a fazer e nada a bloquear.
+        fecharPopup(conferirPeloRotulo);
+        return;
+      }
+
+      var ativaAntes = _sdDuracaoAtiva(botoes);
+      duracaoInfo.ativa = ativaAntes;
+
+      if (ativaAntes === wanted) {
+        duracaoInfo.aplicada = true;
+        duracaoInfo.via = 'ja_ativa';
+        console.log('[DottiSlateHelper] duracao ' + wanted + ' ja ativa');
+        fecharPopup(conferirPeloRotulo);
+        return;
+      }
+
+      console.log('[DottiSlateHelper] clicando duracao ' + wanted +
+        ' (ativa antes: ' + (ativaAntes || 'indeterminada') + ')');
+      _pointerClick(botoes[wanted]);
+
+      _sdEsperar(function () {
+        return _sdDuracaoAtiva(_sdBotoesDeDuracao()) === wanted;
+      }, 2000, function (confirmou) {
+        duracaoInfo.ativa = _sdDuracaoAtiva(_sdBotoesDeDuracao());
+        duracaoInfo.aplicada = !!confirmou;
+        duracaoInfo.via = confirmou ? 'clicada'
+          : (duracaoInfo.ativa === null ? 'estado_indeterminado' : 'nao_confirmou');
+        fecharPopup(conferirPeloRotulo);
+      });
+    }
+
+    // ---- 6. a palavra final e o rotulo do botao: "Video · 720p · 8s ..." ----
+    function conferirPeloRotulo() {
+      var wanted = duration + 's';
+      var resumo = _sdResumo();
+      var noRotulo = _sdDuracaoDoResumo(resumo);
+      console.log('[DottiSlateHelper] configuracoes depois: "' + (resumo || '(ilegivel)') + '"');
+      if (noRotulo) {
+        duracaoInfo.ativa = noRotulo;
+        duracaoInfo.aplicada = (noRotulo === wanted);
+        duracaoInfo.via = (noRotulo === wanted)
+          ? (duracaoInfo.via === 'ja_ativa' ? 'ja_ativa' : 'clicada')
+          : 'rotulo_diverge';
+        if (noRotulo !== wanted) {
+          console.warn('[DottiSlateHelper] o rotulo diz ' + noRotulo + ', pedimos ' + wanted);
+        }
+      }
+      terminar('OK');
+    }
+
   });
 
   // ====== FRAME UPLOAD: INITIAL IMAGE (MAIN WORLD) ======
@@ -1730,5 +1955,5 @@
     document.dispatchEvent(new CustomEvent(eventName, { detail: detail }));
   }
 
-  console.log('[DottiSlateHelper] v4.4.3 ativo (duracao conferida)');
+  console.log('[DottiSlateHelper] v4.4.4 ativo (config pelo rotulo + modelo)');
 })();
