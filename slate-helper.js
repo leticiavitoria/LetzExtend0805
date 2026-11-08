@@ -884,9 +884,13 @@
         }
       }
 
-      // Clicar nas abas re-renderiza o popup: esperar ele voltar antes de mexer
-      // em modelo e duracao. Era aqui que a duracao "sumia" (visiveis=nenhuma).
-      _sdEsperar(_sdPopupAberto, 3000, function (voltou) {
+      // v4.4.5: clicar numa aba FECHA o popup. A checagem anterior rodava no
+      // meio da animacao de fechamento, via os botoes ainda no DOM, dava
+      // "aberto", e 400ms depois a duracao tinha sumido — era esse o
+      // "visiveis=(nenhuma)" com o popup supostamente aberto. Agora esperamos
+      // assentar e REABRIMOS se precisar.
+      setTimeout(function () {
+      abrirPopup(function (voltou) {
         if (!voltou) {
           console.warn('[DottiSlateHelper] popup sumiu depois das abas');
           duracaoInfo.aplicada = false;
@@ -905,6 +909,7 @@
         }
         passoModelo();
       });
+      }, 700);
     });
 
     // ---- 3. modelo de geracao ----
@@ -975,6 +980,14 @@
 
     // ---- 4. x1 ----
     function passoX1() {
+      // Mexer no seletor de modelo tambem pode fechar o popup.
+      abrirPopup(function (ok) {
+        if (!ok) { console.warn('[DottiSlateHelper] popup nao reabriu para x1/duracao'); }
+        passoX1Interno();
+      });
+    }
+
+    function passoX1Interno() {
       if (setX1) {
         var btns2 = Array.from(document.querySelectorAll('button')).filter(function (b) { return b.offsetParent !== null; });
         for (var k = 0; k < btns2.length; k++) {
@@ -985,7 +998,10 @@
           }
         }
       }
-      setTimeout(passoDuracao, 400);
+      setTimeout(function () {
+        // Uma ultima garantia antes de ler os botoes de duracao.
+        abrirPopup(function () { passoDuracao(); });
+      }, 400);
     }
 
     // ---- 5. duracao ----
@@ -1955,5 +1971,5 @@
     document.dispatchEvent(new CustomEvent(eventName, { detail: detail }));
   }
 
-  console.log('[DottiSlateHelper] v4.4.4 ativo (config pelo rotulo + modelo)');
+  console.log('[DottiSlateHelper] v4.4.5 ativo (popup reaberto a cada etapa)');
 })();
