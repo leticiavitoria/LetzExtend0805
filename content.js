@@ -6608,7 +6608,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.4.4 ready (config pelo rotulo + modelo)");
+        console.log("[Lets Automate] v4.4.5 ready (popup reaberto a cada etapa)");
     }
 
     if (document.readyState === "loading") {

@@ -555,7 +555,11 @@
           }
         }));
       } else {
-        console.warn('[Dotti] as29s sem URL de video no payload — nada a baixar');
+        // v4.4.5: sem a URL nao ha download, e ate aqui o log nao dizia o que
+        // a resposta TRAZIA. Um trecho do payload responde isso no proximo log,
+        // sem mais uma rodada de adivinhacao.
+        console.warn('[Dotti] as29s sem URL de video no payload — nada a baixar. Payload: ' +
+          plUrl.substring(0, 300));
       }
     }
 
@@ -836,5 +840,5 @@
     return p;
   };
 
-  console.log('[DottiInterceptor] v4.4.2 ativo (mediaId pela URL do as29s)');
+  console.log('[DottiInterceptor] v4.4.5 ativo (mediaId pela URL do as29s)');
 })();
