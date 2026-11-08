@@ -142,6 +142,11 @@ let queueSettings = { promptDelay: 3000, batchSize: 20, batchInterval: 90000 };
 let currentBatchCount = 0;
 let queuePaused = false;
 let isProcessingQueue = false;
+// v4.5.0: a fila foi entregue ao motor do content.js (START_AUTOMATION). A
+// partir dai o processador legado daqui NAO pode enviar nada sozinho — no log
+// dela, ao recarregar a extensao, o watchdog restaurou a fila antiga e
+// executou o prompt 4 por conta propria. Envio sem ela mandar.
+let _filaDelegada = false;
 let targetTabId = null;
 let totalProcessed = 0;
 let lastActivityTime = 0;
@@ -344,6 +349,7 @@ async function saveQueueState() {
         dottiPaused: queuePaused,
         dottiTabId: targetTabId,
         dottiProcessing: isProcessingQueue,
+        dottiDelegada: _filaDelegada,
         dottiTotalProcessed: totalProcessed,
         dottiLastActivity: lastActivityTime,
         dottiMediaType: queueMediaType
@@ -373,6 +379,18 @@ async function loadQueueState() {
         lastActivityTime = data.dottiLastActivity || 0;
         queueMediaType = data.dottiMediaType || "video";
         isProcessingQueue = data.dottiProcessing || false;
+        _filaDelegada = !!data.dottiDelegada;
+        if (!queuePaused) {
+            // Uma fila que sobrou de antes do reload NUNCA roda sozinha: quem
+            // enviava (o content.js) morreu junto com a pagina, e retomar daqui
+            // seria reenviar sem ela mandar. Vale para estado salvo por versoes
+            // antigas tambem — por isso a regra nao depende de dottiDelegada.
+            // A fila fica PAUSADA; o "Continuar" e decisao dela.
+            console.log('[Dotti] Boot: fila de ' + promptQueue.length + ' prompt(s) sobrou de antes do reload — ' +
+                'pausada, nada sera enviado sozinho (use Continuar)');
+            isProcessingQueue = false;
+            queuePaused = true;
+        }
         return true;
     }
     // Restaurar processedPrompts mesmo sem fila ativa
@@ -384,6 +402,7 @@ async function loadQueueState() {
 }
 
 async function clearQueueState() {
+    _filaDelegada = false;
     promptQueue = [];
     processedPrompts = [];
     currentBatchCount = 0;
@@ -1194,6 +1213,12 @@ async function executePromptInTab(prompt, mediaType) {
 // QUEUE PROCESSING - v3.0.0
 // ============================================
 async function processNextPrompt() {
+    // v4.5.0: com a fila entregue ao content.js, este processador nao envia.
+    // So o "Continuar" (resumeQueue) desfaz a entrega — e e acao dela.
+    if (_filaDelegada) {
+        console.log("[Dotti] processNextPrompt ignorado: a fila esta com o content.js");
+        return;
+    }
     console.log("[Dotti] processNextPrompt called, queue:", promptQueue.length, "paused:", queuePaused, "processing:", isProcessingQueue);
     if (promptQueue.length === 0 || queuePaused) {
         if (promptQueue.length === 0 && isProcessingQueue && totalProcessed > 0) {
@@ -1406,6 +1431,10 @@ async function startQueue(prompts, settings, tabId, mediaType, bgMode) {
         console.error("[Dotti] Erro ao enviar START_AUTOMATION:", e);
         return { success: false, error: e.message };
     }
+    // v4.5.0: entregue. Daqui em diante o motor e o content.js.
+    _filaDelegada = true;
+    isProcessingQueue = false;
+    try { await saveQueueState(); } catch (_e) { }
     return { success: true };
 }
 
@@ -1419,6 +1448,8 @@ async function pauseQueue() {
 }
 
 async function resumeQueue(bgMode) {
+    // Acao explicita dela ("Continuar"): aqui o processador legado pode rodar.
+    _filaDelegada = false;
     queuePaused = false;
     isProcessingQueue = true;
     lastActivityTime = Date.now();
@@ -1529,6 +1560,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } else if (alarm.name === "dottiNextPrompt") {
         processNextPrompt();
     } else if (alarm.name === "dottiWatchdog") {
+        // v4.5.0: fila entregue ao content.js nao e "retomada" por aqui.
+        if (_filaDelegada) return;
         if (isProcessingQueue && !queuePaused && promptQueue.length > 0) {
             const timeSinceLastActivity = Date.now() - lastActivityTime;
             if (timeSinceLastActivity > 3 * 60 * 1000) {
@@ -2322,10 +2355,11 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(async () => {
     await _bootPromise;
-    if (!queuePaused && promptQueue.length > 0) {
-        isProcessingQueue = true;
-        setBadgeStatus("processing");
-        setTimeout(processNextPrompt, 3000);
+    // v4.5.0: abrir o Chrome nao envia prompt nenhum. Antes, qualquer fila
+    // salva e nao pausada era retomada aqui sozinha.
+    if (promptQueue.length > 0) {
+        console.log('[Dotti] onStartup: ha ' + promptQueue.length + ' prompt(s) na fila salva — ' +
+            'nao retomo sozinho (use Continuar)');
     }
 });
 

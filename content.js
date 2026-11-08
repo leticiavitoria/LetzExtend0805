@@ -199,6 +199,30 @@
             return true;
         }
 
+        // Se a assinatura bateu e mesmo assim chegamos aqui, e a revalidacao
+        // periodica: nela tudo e conferido de novo, sem atalho.
+        const _revalidando = (_modoAplicado === _assinaturaModo);
+        const _mediaSub = mediaTypeTarget + '|' + subMode;
+        const _abasMudaram = (_ultimoMediaSub !== _mediaSub);
+
+        // v4.5.0 — MENOS CLIQUES. O rotulo do botao de configuracoes esta no
+        // DOM ("Video · 720p · 8s x1"): da para ler sem abrir o popup. Se ele
+        // ja mostra o que queremos e o resto (abas, modelo) foi confirmado
+        // nesta execucao, nao ha nada a fazer. Cada popup aberto a toa e mais
+        // clique sintetico — e o Flow esta acusando "atividade incomum".
+        if (!_revalidando && !_abasMudaram && !_firstPromptOfSession &&
+            (!_MODELO_ALVO || _modeloConfirmadoNaExecucao)) {
+            const rotuloCfg = _lerRotuloConfig();
+            if (rotuloCfg && rotuloCfg.duracao === (_duracaoAlvo + 's') &&
+                rotuloCfg.video === (mediaTypeTarget === 'video')) {
+                _modoAplicado = _assinaturaModo;
+                _envriosDesdeRevalidacao++;
+                console.log('[Dotti DOM] configuracoes ja corretas pelo rotulo ("' + rotuloCfg.texto +
+                    '") — popup nao aberto');
+                return true;
+            }
+        }
+
         // v3.5.0: Sempre usar slate-helper (popup) — caminho de "tabs visiveis"
         // nao consegue setar duracao (4s/6s/8s estao apenas dentro do popup do Veo 3).
         const tabs = [];
@@ -210,7 +234,10 @@
             const result = await requestSlateHelper(
                 'dotti-switch-mode',
                 { mediaType: mediaTypeTarget, mode: subMode, setX1: _firstPromptOfSession,
-                  duration: wantDuration, modelo: _MODELO_ALVO },
+                  duration: wantDuration, modelo: _MODELO_ALVO,
+                  // so clica nas abas quando o modo mudou ou na revalidacao:
+                  // clicar numa aba FECHA o popup e obriga a reabrir.
+                  abas: _abasMudaram || _revalidando },
                 'dotti-switch-mode-result',
                 12000
             );
@@ -281,11 +308,14 @@
                     result.clicks.some(c => c && c.action === 'not_found');
                 if (algumNaoAchado || naoMemorizar) {
                     _modoAplicado = null;
+                    _ultimoMediaSub = null;
                     console.log('[Dotti DOM] algum alvo nao foi encontrado — vou revalidar no proximo');
                 } else {
                     _modoAplicado = _assinaturaModo;
                     _envriosDesdeRevalidacao = 0;
+                    _ultimoMediaSub = _mediaSub;
                 }
+                if (_MODELO_ALVO && mdl.aplicado === true) _modeloConfirmadoNaExecucao = true;
                 console.log('[Dotti DOM] modo OK: media=' + mediaTypeTarget + ' sub=' + subMode +
                     ' duracao=' + _duracaoAlvo + 's (' + dur.via + ')' +
                     (result.resumo ? ' | configuracoes: "' + result.resumo + '"' : ''));
@@ -531,6 +561,9 @@
     // de novo e o mapa ser refeito se ela mexeu nas imagens entre as rodadas.
     function _resetarGaleriaDaExecucao() {
         _dumpGaleriaFeito = false;
+        // v4.5.0: abas e modelo sao reconfirmados uma vez a cada execucao.
+        _modeloConfirmadoNaExecucao = false;
+        _ultimoMediaSub = null;
         _invalidarMapaDeElementos('nova execucao');
     }
 
@@ -1119,6 +1152,27 @@
     // lista, porque modelos diferentes custam creditos diferentes — "Lite" e
     // "Lite [Lower Priority]" nao sao a mesma coisa. null = nao mexer no modelo.
     const _MODELO_ALVO = 'Veo 3.1 - Lite [Lower Priority]';
+    let _modeloConfirmadoNaExecucao = false;
+    let _ultimoMediaSub = null;   // "video|frames" confirmado por ultimo
+
+    // v4.5.0: le o rotulo do botao de configuracoes direto do DOM. O content
+    // script enxerga a mesma pagina — nao precisa do MAIN world para isso.
+    function _lerRotuloConfig() {
+        const b = document.querySelector('button.settings-trigger-button');
+        if (!b) return null;
+        const alvo = b.querySelector('.settings-summary') || b;
+        const clone = alvo.cloneNode(true);
+        clone.querySelectorAll('mat-icon, i, .material-icons, .material-symbols-outlined, .google-symbols')
+            .forEach(n => n.remove());
+        const texto = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!texto) return null;
+        const m = texto.match(/(\d+)\s*s(?:\b|$)/);
+        return {
+            texto: texto,
+            duracao: m ? (m[1] + 's') : null,
+            video: /v[ií]deo|video/i.test(texto)
+        };
+    }
 
     async function executePrompt(prompt) {
         const _t0Envio = Date.now();
@@ -1483,6 +1537,13 @@
     // atras da flag abaixo, desligado.
     const _USAR_DOM_LEGADO = false;
 
+    // v4.5.0: pedir o as29s NOS MESMOS (dotti-pedir-url) fica desligado.
+    // (1) O as29s nao devolve mais URL — o pedido nao serve para baixar.
+    // (2) E a coisa mais artificial que a extensao fazia: requisicoes que o
+    // proprio app nao fez, com o nosso token. Com o Flow acusando "atividade
+    // incomum", e o primeiro sinal a cortar.
+    const _USAR_PEDIR_URL = false;
+
     const _idParaPrompt = new Map();      // mediaId -> { promptNumber, via }
     const _candidatosDoEnvio = new Map(); // uuid -> promptNumber (conjunto do envio)
     const _uuidsPorPrompt = new Map();    // promptNumber -> Set(uuid)
@@ -1600,7 +1661,15 @@
 
     // A URL assinada expira (~6h): pedimos sempre na hora, nunca guardamos
     // URL velha para reusar depois.
+    let _avisouPedirUrl = false;
     function _pedirUrlAssinada(mediaId, timeoutMs) {
+        if (!_USAR_PEDIR_URL) {
+            if (!_avisouPedirUrl) {
+                _avisouPedirUrl = true;
+                console.log('[Dotti] pedir a URL ao Flow esta desligado (v4.5.0) — o download segue pelo menu');
+            }
+            return Promise.resolve(null);
+        }
         return new Promise((resolve) => {
             let pronto = false;
             const ouvir = (ev) => {
@@ -1758,6 +1827,9 @@
         const alvo = _promptList.find(p => p.number === promptNumber);
         if (!alvo) return;
         const slot = _slots.findIndex(u => u === alvo.uuid);
+        // v4.5.0: o mesmo prompt pode ser liberado pelo media-fetch e depois
+        // pelo DOWNLOAD_RESULTADO. Na segunda vez nao ha nada a fazer.
+        if (slot === -1 && gerado && alvo.gerado) return;
         if (slot !== -1) _slots[slot] = null;
 
         if (gerado) {
@@ -1810,6 +1882,22 @@
             }
         });
 
+        // ---- v4.5.0: as29s novo — identidade sem URL ----
+        // O payload agora e [mediaId, projeto, ?, null, null, [[ts], "PROMPT N: ..."]].
+        // Amarra a midia ao prompt (exato, mesma transacao), mas NAO libera o
+        // slot: isto nao prova que o video ficou pronto. Quem prova e o
+        // download — pelo menu, o media-fetch traz este mesmo mediaId.
+        document.addEventListener('dotti-flow-midia', (e) => {
+            const d = e.detail || {};
+            if (!d.mediaId || !d.promptNumber) {
+                console.warn('[Dotti] identidade do as29s incompleta: ' + JSON.stringify(d));
+                return;
+            }
+            _as29sRecebidos.add(d.mediaId);
+            const reg = _amarrarMedia(d.mediaId, d.promptNumber, 'as29s');
+            if (reg) _promptComUuid.set(d.promptNumber, d.mediaId);
+        });
+
         // ---- as29s: identidade E sinal de pronto ----
         // Se o Flow pediu a URL assinada daquela midia, o video esta pronto.
         document.addEventListener('dotti-flow-url', (e) => {
@@ -1825,6 +1913,12 @@
             }
             _as29sRecebidos.add(d.mediaId);
             if (d.url) _urlAssinadaPorId.set(d.mediaId, { url: d.url, at: Date.now() });
+            // v4.5.0: a URL pode chegar por outro RPC, sem o PROMPT junto. Se o
+            // as29s ja amarrou esta midia, o prompt e conhecido — de forma exata.
+            if (!d.promptNumber) {
+                const jaAmarrado = _promptDoMedia(d.mediaId);
+                if (jaAmarrado) d.promptNumber = jaAmarrado;
+            }
             if (!d.promptNumber) {
                 console.log('[Dotti] as29s sem PROMPT no payload: ' +
                     String(d.mediaId).substring(0, 12) + ' — nao da para amarrar');
@@ -1856,7 +1950,11 @@
             // _mediaTracker da API fica como segunda opcao, para o caso de o
             // Flow voltar a responder pelos endpoints antigos.
             let track = null;
-            const nossoPrompt = _uuidParaPrompt.get(String(mediaId).toLowerCase());
+            // v4.5.0: a amarracao do as29s (mediaId -> PROMPT na mesma resposta)
+            // e a fonte exata. As outras tabelas ficam como reserva.
+            const peloAs29s = _promptDoMedia(String(mediaId).toLowerCase());
+            if (peloAs29s) track = { promptNumber: peloAs29s };
+            const nossoPrompt = track ? null : _uuidParaPrompt.get(String(mediaId).toLowerCase());
             if (nossoPrompt) track = { promptNumber: nossoPrompt };
             if (!track) track = _acharNoTracker(mediaId);
             if (!track || !track.promptNumber) {
@@ -1883,11 +1981,10 @@
                 _rotuloParaPrompt.set(_downloadAtual.rotulo, alvo.number);
             }
 
-            // A API ja confirmou que existe: conta como GERADO agora.
-            if (!alvo.gerado) {
-                alvo.gerado = true;
-                notifyPanel({ type: 'VIDEO_GENERATED', data: { promptNumber: alvo.number } });
-            }
+            // A pagina esta buscando o arquivo: o video existe e esta pronto.
+            // v4.5.0: e este o sinal de "pronto" agora que o as29s nao traz URL
+            // — libera o slot para o proximo envio.
+            _liberarSlotDoPrompt(alvo.number, 'arquivo buscado pela pagina', true);
 
             const nome = _nomeArquivoDoPrompt(alvo, (alvo.foundVideos || 0) + 1);
             console.log('[Dotti] media-fetch mediaId=' + String(mediaId).substring(0, 12) +
@@ -2831,6 +2928,102 @@
         return true;
     }
 
+    // ============================================================
+    // v4.5.0 — DOWNLOAD PELO MENU NATIVO
+    // ============================================================
+    // O as29s parou de trazer a URL. O que sobrou e o caminho do usuario:
+    // more_vert do tile -> "Fazer o download" -> "720p Tamanho original".
+    // A identidade NAO vem do tile (ele nao tem id): no clique, a pagina busca
+    // flow-content.google/video/<mediaId>, o interceptor ve, e a amarracao do
+    // as29s diz de qual prompt e. Midia desconhecida = o background cancela
+    // sem re-baixar. Nome errado continua sendo pior que nao baixar.
+    //
+    // Devagar de proposito: um tile por passe, 7-11s entre passes, e nunca
+    // durante um envio. Com o Flow acusando "atividade incomum", clicar menu
+    // em rajada e o pior que da para fazer.
+    let _ultimoPasseMenu = 0;
+    let _intervaloPasseMenu = 8000;
+    const _MAX_TENTATIVAS_MENU = 2;
+    const _ESPERA_ENTRE_TENTATIVAS_MENU = 60000;   // da tempo do as29s chegar
+    const _tentativasMenu = new Map();   // rotulo -> { n, ultima }
+
+    function _rotuloDoTile(tile) {
+        return (tile.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    }
+
+    async function _passeDeDownloadPeloMenu() {
+        if (_stopRequested || _enviandoAgora || _downloadAtual) return;
+        const agora = Date.now();
+        if (agora - _ultimoPasseMenu < _intervaloPasseMenu) return;
+        _ultimoPasseMenu = agora;
+        _intervaloPasseMenu = 7000 + Math.random() * 4000;
+
+        const faltando = _promptList.filter(t => t.startedAt && !t.downloaded);
+        if (!faltando.length) return;
+
+        // Os nossos videos sao os mais novos e ficam no topo da grade. Olhar so
+        // as primeiras posicoes evita clicar nos videos antigos do projeto.
+        const todos = Array.from(document.querySelectorAll('flow-grid-tile-container'));
+        const janela = todos.slice(0, _enviadosNaExecucao.size + 2);
+        const tile = janela.find(t => {
+            if (!t.querySelector('button[aria-haspopup="menu"]')) return false;   // ainda gerando
+            const r = _rotuloDoTile(t);
+            if (!r || _tilesBaixados.has(r) || _tilesDesistidos.has(r)) return false;
+            const tent = _tentativasMenu.get(r);
+            if (!tent) return true;
+            return tent.n < _MAX_TENTATIVAS_MENU && (agora - tent.ultima) >= _ESPERA_ENTRE_TENTATIVAS_MENU;
+        });
+        if (!tile) return;
+
+        const rotulo = _rotuloDoTile(tile);
+        const falhou = (motivo) => {
+            const t = _tentativasMenu.get(rotulo) || { n: 0, ultima: 0 };
+            t.n++; t.ultima = Date.now();
+            _tentativasMenu.set(rotulo, t);
+            if (t.n >= _MAX_TENTATIVAS_MENU) {
+                _tilesDesistidos.add(rotulo);
+                console.warn('[Dotti Menu] desisti de "' + rotulo.substring(0, 45) + '" (' + motivo +
+                    ') — provavelmente nao e desta execucao');
+            } else {
+                console.log('[Dotti Menu] "' + rotulo.substring(0, 45) + '" nao baixou (' + motivo +
+                    ') — tento de novo em 60s');
+            }
+        };
+
+        try {
+            await chrome.runtime.sendMessage({ action: 'EXPECT_DOWNLOAD', placeholder: true, folder: _downloadFolder });
+        } catch (e) {
+            console.warn('[Dotti Menu] background nao respondeu ao EXPECT_DOWNLOAD: ' + (e && e.message));
+            return;
+        }
+
+        const resultado = new Promise((resolve) => {
+            _downloadAtual = { rotulo: rotulo, resolve: resolve };
+            setTimeout(() => {
+                if (_downloadAtual && _downloadAtual.rotulo === rotulo) {
+                    _downloadAtual = null;
+                    resolve({ ok: false, timeout: true });
+                }
+            }, 15000);
+        });
+
+        console.log('[Dotti Menu] baixando tile pronto: "' + rotulo.substring(0, 45) + '"');
+        const clicou = await baixarTilePeloMenu(tile);
+        if (!clicou) {
+            _downloadAtual = null;
+            falhou('menu nao abriu');
+            return;
+        }
+
+        const r = await resultado;
+        if (r && r.ok) {
+            _tilesBaixados.add(rotulo);
+            _tentativasMenu.delete(rotulo);
+        } else {
+            falhou(r && r.timeout ? 'sem resposta em 15s' : 'midia nao reconhecida');
+        }
+    }
+
     function startVideoUrlScanner() {
         if (_scannerActive) return;
         _scannerActive = true;
@@ -3500,12 +3693,23 @@
             // v4.3.0: a grade precisa mostrar os tiles novos para o as29s sair.
             _rolagemPeriodica();
 
+            // v4.5.0: download pelo menu. So quando nao ha o que enviar agora
+            // (slots cheios ou lista acabou) — nunca atrasa um envio.
+            {
+                const slotLivre = _slots.some(s => s === null);
+                const temPendente = _promptList.some(t => t.status === 'pending');
+                if (!slotLivre || !temPendente) {
+                    try { await _passeDeDownloadPeloMenu(); }
+                    catch (e) { console.error('[Dotti Menu] erro no passe: ' + (e && e.message)); }
+                }
+            }
+
             // v4.2.0 — as29s ORFAO. No log dela: enviados=51, as29s recebidos=47.
             // Quatro prompts nunca receberam as29s, provavelmente porque a
             // pagina so pede a URL quando renderiza o tile. Passado um tempo,
             // pedimos nos mesmos, usando os uuid que o YhhmEf observou. A
             // identidade continua vindo do as29s (a resposta traz o PROMPT).
-            {
+            if (_USAR_PEDIR_URL) {
                 const agora2 = Date.now();
                 for (const t of _promptList) {
                     if (!t.startedAt || t.downloaded) continue;
@@ -4656,6 +4860,11 @@
     // midia: nem href, nem data-*; o unico identificador e o aria-label, que
     // traz o prompt truncado).
     const _tilesBaixados = new Set();
+    // v4.5.0: rotulo do tile -> prompt, aprendido no clique pelo mediaId. A
+    // declaracao tinha sumido na PR #29 e os usos ficaram: o listener do
+    // media-fetch quebraria com ReferenceError justamente durante um download
+    // pelo menu, antes de mandar o nome certo ao background.
+    const _rotuloParaPrompt = new Map();
     // v3.8.0: barreira — um download por vez. Sem isso os cliques viravam
     // rajada (10 "Download esperado" sem nenhum download criado).
     let _downloadAtual = null; // { rotulo, resolve }
@@ -5927,6 +6136,7 @@
                             data: { promptNumber: alvo.number, mediaId: mediaId || null, url: null, downloadFolder: _downloadFolder }
                         });
                         console.log('[Dotti] Baixado com nome exato: #' + alvo.number + ' -> ' + filename);
+                        _liberarSlotDoPrompt(alvo.number, 'baixado', true);
                     }
                 }
                 if (_downloadAtual) {
@@ -6608,7 +6818,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.4.5 ready (popup reaberto a cada etapa)");
+        console.log("[Lets Automate] v4.5.0 ready (download pelo menu; sem envio automatico)");
     }
 
     if (document.readyState === "loading") {
