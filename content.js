@@ -188,8 +188,9 @@
         // revalidamos a cada 10 prompts e em QUALQUER falha — velocidade nao
         // vale um video com duracao errada.
         const _duracaoAlvo = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
+
         const _assinaturaModo = mediaTypeTarget + '|' + subMode + '|' + _duracaoAlvo +
-            '|' + (_firstPromptOfSession ? 'x1' : '-');
+            '|' + (_firstPromptOfSession ? 'x1' : '-') + '|' + (_MODELO_ALVO || '-');
 
         if (_modoAplicado === _assinaturaModo && _envriosDesdeRevalidacao < _REVALIDAR_MODO_A_CADA) {
             _envriosDesdeRevalidacao++;
@@ -208,7 +209,8 @@
             const wantDuration = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
             const result = await requestSlateHelper(
                 'dotti-switch-mode',
-                { mediaType: mediaTypeTarget, mode: subMode, setX1: _firstPromptOfSession, duration: wantDuration },
+                { mediaType: mediaTypeTarget, mode: subMode, setX1: _firstPromptOfSession,
+                  duration: wantDuration, modelo: _MODELO_ALVO },
                 'dotti-switch-mode-result',
                 12000
             );
@@ -221,6 +223,31 @@
                 // como se tivesse sido aplicado, e os prompts seguintes
                 // pulavam o popup — o video ficava preso na duracao do
                 // primeiro prompt. Era esse o bug.
+                let naoMemorizar = false;
+                const mdl = result.modelo || {};
+                if (_MODELO_ALVO) {
+                    console.log('[Dotti DOM] modelo: ' + (mdl.atual || '?') + ' (' + (mdl.via || 'sem resposta') + ')');
+                    // "Sei que esta errado" bloqueia; "nao consigo mexer" nao.
+                    // Modelo errado muda o custo em creditos por video.
+                    if (mdl.aplicado === false &&
+                        (mdl.via === 'nao_confirmou' || mdl.via === 'opcao_inexistente')) {
+                        _modoAplicado = null;
+                        console.warn('[Dotti DOM] modelo "' + _MODELO_ALVO + '" nao aplicado (' + mdl.via +
+                            '; atual: ' + (mdl.atual || '?') +
+                            '; opcoes: ' + ((mdl.opcoes || []).join(' | ') || 'nenhuma') +
+                            ') — prompt nao sera enviado');
+                        return false;
+                    }
+                    if (mdl.aplicado === false) {
+                        // Nao da para zerar _modoAplicado aqui: o trecho da
+                        // duracao, logo abaixo, regravava a assinatura e o
+                        // popup nunca mais abria para tentar o modelo de novo.
+                        naoMemorizar = true;
+                        console.warn('[Dotti DOM] nao consegui mexer no seletor de modelo (' + mdl.via +
+                            ') — envio assim e revalido no proximo prompt');
+                    }
+                }
+
                 const dur = result.duracao || {};
                 const duracaoOk = (dur.aplicada === true);
                 // "Nao consigo ler o estado" nao e o mesmo que "sei que esta
@@ -252,7 +279,7 @@
                 // encontrado, o modo pode nao estar como pedimos — nao guardar.
                 const algumNaoAchado = Array.isArray(result.clicks) &&
                     result.clicks.some(c => c && c.action === 'not_found');
-                if (algumNaoAchado) {
+                if (algumNaoAchado || naoMemorizar) {
                     _modoAplicado = null;
                     console.log('[Dotti DOM] algum alvo nao foi encontrado — vou revalidar no proximo');
                 } else {
@@ -260,7 +287,8 @@
                     _envriosDesdeRevalidacao = 0;
                 }
                 console.log('[Dotti DOM] modo OK: media=' + mediaTypeTarget + ' sub=' + subMode +
-                    ' duracao=' + _duracaoAlvo + 's (' + dur.via + ')');
+                    ' duracao=' + _duracaoAlvo + 's (' + dur.via + ')' +
+                    (result.resumo ? ' | configuracoes: "' + result.resumo + '"' : ''));
                 return true;
             }
 
@@ -1086,6 +1114,11 @@
     let _modoAplicado = null;
     let _envriosDesdeRevalidacao = 0;
     const _REVALIDAR_MODO_A_CADA = 10;
+
+    // v4.4.4: modelo de geracao. O nome tem de bater com o que o Flow mostra na
+    // lista, porque modelos diferentes custam creditos diferentes — "Lite" e
+    // "Lite [Lower Priority]" nao sao a mesma coisa. null = nao mexer no modelo.
+    const _MODELO_ALVO = 'Veo 3.1 - Lite [Lower Priority]';
 
     async function executePrompt(prompt) {
         const _t0Envio = Date.now();
@@ -6575,7 +6608,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.4.3 ready (duracao conferida)");
+        console.log("[Lets Automate] v4.4.4 ready (config pelo rotulo + modelo)");
     }
 
     if (document.readyState === "loading") {
