@@ -585,6 +585,49 @@
     _dispatch('dotti-gallery-debug-result', info);
   });
 
+  // v4.4.3: estado de um botao sem depender de data-state. No Flow Angular o
+  // data-state nao existe mais (o log dela repete "was null" em todo clique),
+  // entao a duracao era "setada" sem nunca ser conferida.
+  function _sdEstado(el) {
+    return [
+      (el.className || '').toString(),
+      el.getAttribute('data-state') || '',
+      el.getAttribute('aria-checked') || '',
+      el.getAttribute('aria-selected') || '',
+      el.getAttribute('aria-pressed') || ''
+    ].join('|');
+  }
+
+  // Os botoes de duracao sao um grupo de radio: o ativo e o que destoa dos
+  // outros dois. Comparar entre si funciona sem conhecer a classe do Angular.
+  function _sdDuracaoAtiva(botoes) {
+    var chaves = Object.keys(botoes);
+    if (chaves.length < 2) return null;
+    var estados = chaves.map(function(k) { return _sdEstado(botoes[k]); });
+    var contagem = {};
+    for (var i = 0; i < estados.length; i++) contagem[estados[i]] = (contagem[estados[i]] || 0) + 1;
+    var unico = null;
+    for (var j = 0; j < estados.length; j++) {
+      if (contagem[estados[j]] === 1) {
+        if (unico !== null) return null;  // mais de um destoando: nao da para afirmar
+        unico = chaves[j];
+      }
+    }
+    return unico;
+  }
+
+  function _sdBotoesDeDuracao() {
+    var cands = Array.from(document.querySelectorAll(
+      'button, [role="button"], [role="radio"], [role="option"], [role="tab"]'))
+      .filter(function(b) { return b.offsetParent !== null; });
+    var out = {};
+    for (var d = 0; d < cands.length; d++) {
+      var t = (cands[d].textContent || '').replace(/\s+/g, '').toLowerCase();
+      if ((t === '4s' || t === '6s' || t === '8s') && !out[t]) out[t] = cands[d];
+    }
+    return out;
+  }
+
   // ====== MODE SWITCH: IMAGE/VIDEO + INGREDIENTS/FRAMES (MAIN WORLD) ======
   // v3.4.0: Suporta DOIS grupos de tabs no seletor de modo:
   //   Group 1 (mediaType): image(icon:image) | video(icon:videocam)
@@ -703,47 +746,85 @@
         }
 
         // Set video duration (4s / 6s / 8s) — Veo 3 popup
-        if (duration === 4 || duration === 6 || duration === 8) {
-          var wanted = duration + 's';
-          var btns3 = Array.from(document.querySelectorAll('button, [role="button"], [role="radio"], [role="option"], [role="tab"]')).filter(function(b) { return b.offsetParent !== null; });
-          var visible = [];
-          var durTarget = null;
-          for (var d = 0; d < btns3.length; d++) {
-            var dtxt = (btns3[d].textContent || '').replace(/\s+/g, '').toLowerCase();
-            if (dtxt === '4s' || dtxt === '6s' || dtxt === '8s') {
-              visible.push(dtxt);
-              if (dtxt === wanted) durTarget = btns3[d];
-            }
-          }
-          if (durTarget) {
-            var dstate = durTarget.getAttribute('data-state');
-            if (dstate === 'active') {
-              console.log('[DottiSlateHelper] Duration ' + wanted + ' already active');
-            } else {
-              console.log('[DottiSlateHelper] Setting duration ' + wanted + ' (was ' + dstate + ')');
-              _pointerClick(durTarget);
-            }
-          } else {
-            console.log('[DottiSlateHelper] Duration button ' + wanted + ' not found, visible=' + visible.join(','));
-          }
+        // v4.4.3: antes isto so logava. Quando o botao nao aparecia, o
+        // resultado saia 'OK' do mesmo jeito, o content.js memorizava a
+        // duracao como aplicada e pulava o popup nos prompts seguintes — o
+        // video ficava preso na duracao do primeiro prompt.
+        var duracaoInfo = { pedida: duration || null, aplicada: null, via: null, visiveis: [], ativa: null };
+
+        function finalizar() {
+          setTimeout(function() {
+            console.log('[DottiSlateHelper] Closing mode selector');
+            _pointerClick(cropBtn);
+            setTimeout(function() {
+              _dispatch('dotti-switch-mode-result', {
+                requestId: requestId,
+                result: 'OK',
+                mediaType: mediaType,
+                mode: subMode,
+                clicks: clickResults,
+                x1Set: setX1,
+                duracao: duracaoInfo
+              });
+            }, 1000);
+          }, 500);
         }
 
-        // Close mode selector
-        setTimeout(function() {
-          console.log('[DottiSlateHelper] Closing mode selector');
-          _pointerClick(cropBtn);
+        if (duration !== 4 && duration !== 6 && duration !== 8) { finalizar(); return; }
 
-          setTimeout(function() {
-            _dispatch('dotti-switch-mode-result', {
-              requestId: requestId,
-              result: 'OK',
-              mediaType: mediaType,
-              mode: subMode,
-              clicks: clickResults,
-              x1Set: setX1
-            });
-          }, 1000);
-        }, 500);
+        var wanted = duration + 's';
+        var botoesDur = _sdBotoesDeDuracao();
+        duracaoInfo.visiveis = Object.keys(botoesDur);
+
+        if (!botoesDur[wanted]) {
+          duracaoInfo.aplicada = false;
+          duracaoInfo.via = 'botao_ausente';
+          console.warn('[DottiSlateHelper] duracao ' + wanted + ' NAO encontrada; visiveis=' +
+            (duracaoInfo.visiveis.join(',') || '(nenhuma)'));
+          finalizar();
+          return;
+        }
+
+        var ativaAntes = _sdDuracaoAtiva(botoesDur);
+        duracaoInfo.ativa = ativaAntes;
+
+        if (ativaAntes === wanted) {
+          duracaoInfo.aplicada = true;
+          duracaoInfo.via = 'ja_ativa';
+          console.log('[DottiSlateHelper] duracao ' + wanted + ' ja estava ativa');
+          finalizar();
+          return;
+        }
+
+        console.log('[DottiSlateHelper] clicando duracao ' + wanted +
+          ' (ativa antes: ' + (ativaAntes || 'indeterminada') + ')');
+        _pointerClick(botoesDur[wanted]);
+
+        // Confirmar que pegou — nunca presumir.
+        var orcamentoDur = 2000;
+        (function conferir() {
+          var agora = _sdBotoesDeDuracao();
+          var ativa = _sdDuracaoAtiva(agora);
+          if (ativa === wanted) {
+            duracaoInfo.aplicada = true;
+            duracaoInfo.via = 'clicada';
+            duracaoInfo.ativa = ativa;
+            console.log('[DottiSlateHelper] duracao ' + wanted + ' confirmada');
+            finalizar();
+            return;
+          }
+          orcamentoDur -= 250;
+          if (orcamentoDur <= 0) {
+            duracaoInfo.aplicada = false;
+            duracaoInfo.via = (ativa === null ? 'estado_indeterminado' : 'nao_confirmou');
+            duracaoInfo.ativa = ativa;
+            console.warn('[DottiSlateHelper] duracao ' + wanted + ' NAO confirmada (ativa: ' +
+              (ativa || 'indeterminada') + ')');
+            finalizar();
+            return;
+          }
+          setTimeout(conferir, 250);
+        })();
       }, 600);
     }, 1500);
   });
@@ -1649,5 +1730,5 @@
     document.dispatchEvent(new CustomEvent(eventName, { detail: detail }));
   }
 
-  console.log('[DottiSlateHelper] v4.4.0 ativo (galeria por titulo)');
+  console.log('[DottiSlateHelper] v4.4.3 ativo (duracao conferida)');
 })();
