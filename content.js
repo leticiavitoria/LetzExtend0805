@@ -1544,6 +1544,10 @@
     // incomum", e o primeiro sinal a cortar.
     const _USAR_PEDIR_URL = false;
 
+    // v4.5.1: download direto pela URL assinada desligado enquanto o caminho
+    // do menu estiver ativo. Os dois juntos baixavam o mesmo video duas vezes.
+    const _USAR_DOWNLOAD_DIRETO = false;
+
     const _idParaPrompt = new Map();      // mediaId -> { promptNumber, via }
     const _candidatosDoEnvio = new Map(); // uuid -> promptNumber (conjunto do envio)
     const _uuidsPorPrompt = new Map();    // promptNumber -> Set(uuid)
@@ -1795,7 +1799,10 @@
                     // v4.2.0: o downloads API so diz SERVER_FORBIDDEN. A sonda
                     // pergunta da pagina e loga o status HTTP de verdade, para
                     // a proxima falha nao virar adivinhacao.
-                    if (_ultimaUrlTentada) {
+                    // v4.5.1: desligada. O fetch da sonda e bloqueado por CORS
+                    // (o log mostrou o erro) e era mais uma requisicao que o
+                    // app nao fez — nao vale o sinal de "atividade incomum".
+                    if (false && _ultimaUrlTentada) {
                         try {
                             document.dispatchEvent(new CustomEvent('dotti-sondar-url', {
                                 detail: { url: _ultimaUrlTentada }
@@ -1929,7 +1936,23 @@
 
             _statusRecebidoEm.set(d.promptNumber, Date.now());
             _liberarSlotDoPrompt(d.promptNumber, 'as29s recebido', true);
-            _enfileirarDownload(d.mediaId, d.promptNumber);
+
+            // v4.5.1 — UM DONO POR VIDEO. O as29s so volta com URL porque NOS
+            // clicamos em "720p": e consequencia do download pelo menu, nao um
+            // sinal independente. Baixar por ela tambem criava um SEGUNDO
+            // download do mesmo video — o renomeado na pasta e o do Flow solto
+            // em Downloads com o nome do prompt. Agora a URL so e repassada ao
+            // background, que a usa para renomear o download do proprio menu.
+            if (_USAR_DOWNLOAD_DIRETO) {
+                _enfileirarDownload(d.mediaId, d.promptNumber);
+            } else if (d.url) {
+                chrome.runtime.sendMessage({
+                    action: 'URL_ASSINADA',
+                    mediaId: d.mediaId,
+                    url: d.url,
+                    promptNumber: d.promptNumber
+                }).catch(() => { });
+            }
         });
 
         // v3.9.3: uuid vindos das respostas de RPC (e do erro do Angular).
@@ -6818,7 +6841,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.5.0 ready (download pelo menu; sem envio automatico)");
+        console.log("[Lets Automate] v4.5.1 ready (um download por video)");
     }
 
     if (document.readyState === "loading") {
