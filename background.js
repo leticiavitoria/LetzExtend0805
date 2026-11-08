@@ -2030,6 +2030,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     break;
                 }
 
+                // v4.5.1: URL assinada de uma midia (o as29s a traz quando
+                // clicamos em 720p). Nao baixa nada: fica guardada para o
+                // re-download do arquivo do menu, caso o Flow o entregue por blob:.
+                case "URL_ASSINADA": {
+                    const { mediaId, url } = message;
+                    // So guarda por mediaId. O mediaId do download pendente vem
+                    // SO do clique (EXPECT_DOWNLOAD_EXACT): atribui-lo daqui
+                    // poderia casar a URL de outro video com este arquivo.
+                    if (mediaId && url) _urlAssinadaPorMidia.set(mediaId, { url: url, at: Date.now() });
+                    sendResponse({ success: true });
+                    break;
+                }
+
                 // v3.8.0: o interceptor viu a pagina buscar a midia por id e o
                 // content ja resolveu mediaId -> prompt -> nome. Identidade exata.
                 case "EXPECT_DOWNLOAD_EXACT": {
@@ -2081,6 +2094,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             break;
                         }
 
+                        _marcarComoNossa(urlFinal);
                         const id = await chrome.downloads.download({
                             url: urlFinal,
                             filename: destino,
@@ -2642,6 +2656,24 @@ let _extendDownloadQueue = []; // FIFO: [{sceneNumber, folder, totalSeconds, sta
 let _extendDownloadListener = null;
 let _extendDownloadTimeoutId = null;
 let _extendOurDownloadIds = new Set(); // IDs criados por nos (skip para evitar loop)
+// v4.5.1: URLs que NOS vamos baixar, registradas ANTES do chrome.downloads.download.
+// O onCreated dispara antes do callback que devolve o id — por isso o
+// _extendOurDownloadIds chegava tarde, e o vigia pegava o NOSSO download como se
+// fosse o do Flow (o log mostrou: "cancelando download nativo" com a URL que
+// nos mesmos tinhamos acabado de pedir). Com a URL registrada antes, nao ha
+// corrida.
+const _urlsNossas = new Set();
+// v4.5.1: URL assinada por midia, repassada pelo content quando o as29s a traz
+// (consequencia do clique em 720p). Serve para renomear o download do menu
+// quando o do Flow vier como blob:.
+const _urlAssinadaPorMidia = new Map();   // mediaId -> { url, at }
+
+function _marcarComoNossa(url) {
+    if (!url) return;
+    _urlsNossas.add(url);
+    // nao cresce para sempre: a URL so precisa viver ate o onCreated
+    setTimeout(() => _urlsNossas.delete(url), 120000);
+}
 // v3.8.0: nome EXATO vindo do interceptor (mediaId -> prompt), registrado
 // entre o clique no menu e o onCreated do blob. Tem prioridade sobre tudo.
 let _nomeExatoPendente = null; // { fullName, promptNumber, mediaId, at }
@@ -2691,9 +2723,15 @@ function _installExtendDownloadListener(pending) {
 
     _extendDownloadListener = async function (item) {
         try {
-            // Ignorar nossos proprios re-downloads (evita loop infinito)
+            // Ignorar nossos proprios downloads (evita loop infinito e, v4.5.1,
+            // evita o vigia "renomear" o nosso no lugar do download do Flow).
             if (_extendOurDownloadIds.has(item.id)) {
                 _extendOurDownloadIds.delete(item.id);
+                return;
+            }
+            if (_urlsNossas.has(item.url) || (item.finalUrl && _urlsNossas.has(item.finalUrl))) {
+                _urlsNossas.delete(item.url);
+                if (item.finalUrl) _urlsNossas.delete(item.finalUrl);
                 return;
             }
             if (!_extendDownloadQueue.length) return;
@@ -2804,11 +2842,21 @@ function _installExtendDownloadListener(pending) {
                 console.warn('[Extend] cancel/erase falhou:', e.message);
             }
 
+            // v4.5.1: se o Flow baixou por blob: e temos a URL assinada desta
+            // midia, re-baixamos pela URL assinada — e um https estavel, que o
+            // service worker sempre alcanca. Se nao, a URL do proprio download.
+            const midiaDoPendente = next.mediaId || (exato && exato.mediaId) || null;
+            const assinada = midiaDoPendente ? _urlAssinadaPorMidia.get(midiaDoPendente) : null;
+            const urlRe = (/^blob:/i.test(url) && assinada && (Date.now() - assinada.at) < 3600000)
+                ? assinada.url : url;
+            if (urlRe !== url) console.log('[Download] blob do Flow -> re-download pela URL assinada');
+
             let newId;
+            _marcarComoNossa(urlRe);
             try {
                 newId = await new Promise((resolve, reject) => {
                     chrome.downloads.download({
-                        url: url,
+                        url: urlRe,
                         filename: newName,
                         conflictAction: 'uniquify',
                         saveAs: false
