@@ -3148,17 +3148,68 @@
         _avisouSemScroller = false;
     }
 
-    // setPromptList — com campos identicos ao taskList do DarkPlanner
-    function setPromptList(prompts, folder, mediaType, autoDownload) {
-        // Pre-scan de videos existentes no DOM (identico DarkPlanner scanExistingVideos)
-        const existingUrls = scanExistingVideos();
-        for (const url of existingUrls) {
-            _downloadedVideoUrls.add(url);
+    // ============================================================
+    // v4.5.3 — CONTINUAR: so os prompts NUNCA enviados
+    // ============================================================
+    // Regra dela: o "Continuar" envia so o que nunca foi enviado. O painel ja
+    // manda so os "waiting"; aqui o motor MANTEM o que foi enviado antes da
+    // parada e ainda nao baixou — com as amarracoes mediaId -> prompt, os
+    // tiles ja baixados e os contadores — para que esses videos ainda sejam
+    // baixados. Antes, o Continuar ia para o processador legado do background
+    // com a fila INTEIRA do inicio, e podia reenviar o que ja tinha ido.
+    function _continuarPromptList(prompts, folder, mediaType, autoDownload) {
+        const mantidos = [];
+        for (const t of _promptList) {
+            if (!t.startedAt || t.downloaded) continue;
+            // Enviado e nao baixado: volta a "gerando" e o relogio do teto e
+            // rearmado — o video pode ter ficado pronto durante a parada.
+            t.status = 'generating';
+            t.failType = null;
+            t.error = null;
+            _statusRecebidoEm.set(t.number, Date.now());
+            mantidos.push(t);
         }
-        _nextItemIndex = existingUrls.size; // Comecar contagem a partir dos itens existentes
 
-        // Task objects com campos identicos ao DarkPlanner taskList
-        _promptList = (prompts || []).map((p, i) => ({
+        const jaNoMotor = new Set(mantidos.map(t => t.number));
+        const enviadosAntes = new Set(_promptList.filter(t => t.startedAt).map(t => t.number));
+        const novos = [];
+        for (const p of (prompts || [])) {
+            // Nunca reenviar: um numero que ja foi enviado nesta execucao fica de fora.
+            if (enviadosAntes.has(p.number) || jaNoMotor.has(p.number)) {
+                console.warn('[Dotti] Continuar: #' + p.number + ' ja foi enviado antes — NAO reenvio');
+                continue;
+            }
+            novos.push(p);
+        }
+
+        _promptList = mantidos.concat(novos.map((p, i) => _novaTarefa(p, mantidos.length + i)));
+        _promptList.forEach((t, i) => { t.index = i; });
+
+        _downloadFolder = folder || _downloadFolder || 'LetzVideos';
+        _mediaType = mediaType || _mediaType || 'video';
+        _autoDownload = autoDownload !== false;
+
+        // So o estado de ENVIO recomeca. Identidade, tiles e contadores ficam.
+        _sendLockByIndex.clear();
+        _consecutiveErrorCount = 0;
+        _pendingRewrites = 0;
+        _stopRequested = false;
+        _activeSlots = 0;
+        _recentHighDemandError = false;
+        _lastSubmittedTaskIndex = -1;
+        // O Flow pode ter mudado de modo durante a parada: o primeiro envio
+        // confere o popup de novo.
+        _modoAplicado = null;
+
+        console.log('[Dotti] Continuar: ' + novos.length + ' prompt(s) nunca enviado(s) + ' +
+            mantidos.length + ' enviado(s) antes ainda sem download' +
+            (mantidos.length ? ' (' + mantidos.map(t => '#' + t.number).join(', ') + ')' : ''));
+    }
+
+    // Objeto de tarefa do motor (campos identicos ao taskList do DarkPlanner).
+    // v4.5.3: extraido do setPromptList para o "Continuar" reusar.
+    function _novaTarefa(p, i) {
+        return {
             index: i,                        // posicao na taskList (0-based)
             number: p.number,                // numero do prompt (1-based)
             duration: p.duration || 8,       // duracao do video em segundos (4/6/8)
@@ -3188,7 +3239,20 @@
             image: null,
             imageDataUrl: p.imageDataUrl || null,  // v3.4.0: Frame image data URL
             imageName: p.imageName || null          // v3.4.0: Frame image filename
-        }));
+        };
+    }
+
+    // setPromptList — com campos identicos ao taskList do DarkPlanner
+    function setPromptList(prompts, folder, mediaType, autoDownload) {
+        // Pre-scan de videos existentes no DOM (identico DarkPlanner scanExistingVideos)
+        const existingUrls = scanExistingVideos();
+        for (const url of existingUrls) {
+            _downloadedVideoUrls.add(url);
+        }
+        _nextItemIndex = existingUrls.size; // Comecar contagem a partir dos itens existentes
+
+        // Task objects com campos identicos ao DarkPlanner taskList
+        _promptList = (prompts || []).map((p, i) => _novaTarefa(p, i));
         _downloadFolder = folder || 'LetzVideos';
         _mediaType = mediaType || 'video';
         _autoDownload = autoDownload !== false;
@@ -6102,7 +6166,7 @@
                         // (background.js faz sleep(2000) antes de enviar START_AUTOMATION)
                         _stopRequested = false;
 
-                        const { prompts, settings, mediaType, folder, autoDownload } = message;
+                        const { prompts, settings, mediaType, folder, autoDownload, continuar } = message;
                         _maxSimultaneous = settings?.maxSimultaneous || 3;
                         _currentQueueSettings = settings || {};
                         _currentQueueMediaType = mediaType || 'video';
@@ -6112,11 +6176,16 @@
                         // entao scanExistingVideos() nao encontra todos os videos antigos
                         const previouslyDownloaded = new Set(_downloadedVideoUrls);
 
-                        // Reset scanner
-                        resetVideoUrlScanner();
+                        if (continuar && _promptList.length) {
+                            // v4.5.3: Continuar — mantem o que ja foi enviado, nao reseta nada.
+                            _continuarPromptList(prompts, folder, mediaType, autoDownload);
+                        } else {
+                            // Reset scanner
+                            resetVideoUrlScanner();
 
-                        // Configurar prompt list com task objects
-                        setPromptList(prompts, folder, mediaType, autoDownload);
+                            // Configurar prompt list com task objects
+                            setPromptList(prompts, folder, mediaType, autoDownload);
+                        }
 
                         // Restaurar URLs previamente baixadas (que react-virtuoso removeu do DOM)
                         for (const url of previouslyDownloaded) {
@@ -6128,7 +6197,8 @@
                             requestFetchIntercept(settings.outputCount);
                         }
 
-                        console.log('[Dotti] START_AUTOMATION: ' + prompts.length + ' prompts, ' + _maxSimultaneous + ' slots simultaneos');
+                        console.log('[Dotti] START_AUTOMATION' + (continuar ? ' (continuar)' : '') + ': ' +
+                            prompts.length + ' prompts, ' + _maxSimultaneous + ' slots simultaneos');
 
                         // Iniciar processamento (nao bloqueia — roda em paralelo)
                         processAllPromptsWithSlots();
@@ -6525,24 +6595,29 @@
         switch (type) {
             case "START_QUEUE":
                 _firstPromptOfSession = true; // v2.0.2: resetar para garantir x1 no primeiro prompt
-                // v3.1.0: Preservar URLs ja baixadas antes do reset (react-virtuoso)
-                const _prevDownloaded = new Set(_downloadedVideoUrls);
-                resetVideoUrlScanner();
-                // Receber prompt list do panel para matching no scanner
-                setPromptList(
-                    data.prompts,
-                    data.folder || 'LetzVideos',
-                    data.mediaType || 'video',
-                    data.autoDownload !== false
-                );
-                for (const _u of _prevDownloaded) _downloadedVideoUrls.add(_u);
-                startVideoUrlScanner();
+                if (!data.continuar) {
+                    // v3.1.0: Preservar URLs ja baixadas antes do reset (react-virtuoso)
+                    const _prevDownloaded = new Set(_downloadedVideoUrls);
+                    resetVideoUrlScanner();
+                    // Receber prompt list do panel para matching no scanner
+                    setPromptList(
+                        data.prompts,
+                        data.folder || 'LetzVideos',
+                        data.mediaType || 'video',
+                        data.autoDownload !== false
+                    );
+                    for (const _u of _prevDownloaded) _downloadedVideoUrls.add(_u);
+                    startVideoUrlScanner();
+                }
+                // v4.5.3: no Continuar a lista e montada pelo START_AUTOMATION,
+                // que mantem o que ja foi enviado.
                 chrome.runtime.sendMessage({
                     action: "START_QUEUE",
                     prompts: data.prompts,
                     settings: data.settings,
                     tabId: await getCurrentTabId(),
-                    mediaType: data.mediaType
+                    mediaType: data.mediaType,
+                    continuar: !!data.continuar
                 });
                 break;
 
@@ -6870,7 +6945,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.5.2 ready (modo imagem)");
+        console.log("[Lets Automate] v4.5.3 ready (continuar so o nunca enviado)");
     }
 
     if (document.readyState === "loading") {

@@ -1336,7 +1336,7 @@ async function processNextPrompt() {
     }
 }
 
-async function startQueue(prompts, settings, tabId, mediaType, bgMode) {
+async function startQueue(prompts, settings, tabId, mediaType, bgMode, continuar) {
     if (!tabId && targetTabId) tabId = targetTabId;
     if (!tabId) return { success: false, error: "no_tab" };
 
@@ -1425,7 +1425,9 @@ async function startQueue(prompts, settings, tabId, mediaType, bgMode) {
             },
             mediaType: mediaType,
             folder: settings.folder || 'LetzVideos',
-            autoDownload: true
+            autoDownload: true,
+            // v4.5.3: Continuar — o content mantem o que ja foi enviado
+            continuar: !!continuar
         });
     } catch (e) {
         console.error("[Dotti] Erro ao enviar START_AUTOMATION:", e);
@@ -1448,8 +1450,10 @@ async function pauseQueue() {
 }
 
 async function resumeQueue(bgMode) {
-    // Acao explicita dela ("Continuar"): aqui o processador legado pode rodar.
-    _filaDelegada = false;
+    // v4.5.3: o "Continuar" nao passa mais por aqui — vai como START_QUEUE com
+    // continuar=true, que envia so os nunca enviados. Este caminho legado
+    // retomava a fila INTEIRA do inicio; com a fila entregue ao content.js, o
+    // processNextPrompt agora se recusa a rodar (nao desfazemos a entrega).
     queuePaused = false;
     isProcessingQueue = true;
     lastActivityTime = Date.now();
@@ -1636,7 +1640,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     break;
 
                 case "START_QUEUE":
-                    sendResponse(await startQueue(message.prompts, message.settings, message.tabId || targetTabId, message.mediaType, message.backgroundMode));
+                    sendResponse(await startQueue(message.prompts, message.settings, message.tabId || targetTabId,
+                        message.mediaType, message.backgroundMode, !!message.continuar));
                     break;
 
                 case "TRUSTED_CLICK": {
