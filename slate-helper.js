@@ -653,9 +653,24 @@
     return m ? (m[1] + 's') : null;
   }
 
-  // O popup esta aberto quando os botoes de duracao existem na tela.
+  // Botoes de quantidade (x1 x2 x3 x4): existem no popup de VIDEO e de IMAGEM.
+  function _sdBotoesDeQuantidade() {
+    var n = 0;
+    var cands = Array.from(document.querySelectorAll('button, [role="button"], [role="radio"], [role="option"]'))
+      .filter(_sdVisivel);
+    for (var i = 0; i < cands.length; i++) {
+      var t = (cands[i].textContent || '').replace(/\s+/g, '').toLowerCase();
+      if (t === 'x1' || t === 'x2' || t === 'x3' || t === 'x4') n++;
+    }
+    return n;
+  }
+
+  // O popup esta aberto quando os botoes de duracao OU os de quantidade estao
+  // na tela. v4.5.2: antes era so a duracao — e IMAGEM NAO TEM DURACAO. No modo
+  // imagem o popup abria, a checagem dizia "nao abriu", o segundo clique (que
+  // alterna) fechava, e o prompt nunca era enviado.
   function _sdPopupAberto() {
-    return Object.keys(_sdBotoesDeDuracao()).length >= 2;
+    return Object.keys(_sdBotoesDeDuracao()).length >= 2 || _sdBotoesDeQuantidade() >= 2;
   }
 
   var _SD_RE_MODELO = /\b(veo|omni)\b/i;
@@ -864,11 +879,19 @@
       // precisa de clique (cada clique fecha o popup).
       var rotuloAgora = _sdResumo() || '';
       var jaEmVideo = /v[ií]deo|video/i.test(rotuloAgora);
+      // O rotulo de video e sempre "Video · 720p · 8s ..."; o de imagem e o nome
+      // do modelo ("Nano Banana 2.1 x1"), sem duracao. Sem "Video" e sem "Ns"
+      // no rotulo, ja estamos em imagem — clicar na aba so fecharia o popup.
+      var jaEmImagem = !!rotuloAgora && !jaEmVideo && !_sdDuracaoDoResumo(rotuloAgora);
       for (var t = 0; t < targets.length; t++) {
         var targetAlts = targets[t];
         if (!clicarAbas) { clickResults.push({ icon: targetAlts[0], action: 'skipped' }); continue; }
         if (mediaType === 'video' && targetAlts.indexOf('videocam') >= 0 && jaEmVideo) {
           clickResults.push({ icon: 'videocam', action: 'already_active' });
+          continue;
+        }
+        if (mediaType === 'image' && targetAlts.indexOf('image') >= 0 && jaEmImagem) {
+          clickResults.push({ icon: 'image', action: 'already_active' });
           continue;
         }
         var targetIcon = targetAlts[0];
@@ -1019,7 +1042,12 @@
 
     // ---- 5. duracao ----
     function passoDuracao() {
-      if (duration !== 4 && duration !== 6 && duration !== 8) { fecharPopup(function () { terminar('OK'); }); return; }
+      if (duration !== 4 && duration !== 6 && duration !== 8) {
+        duracaoInfo.aplicada = null;
+        duracaoInfo.via = 'nao_se_aplica';
+        fecharPopup(function () { terminar('OK'); });
+        return;
+      }
 
       var wanted = duration + 's';
       var botoes = _sdBotoesDeDuracao();
@@ -1984,5 +2012,5 @@
     document.dispatchEvent(new CustomEvent(eventName, { detail: detail }));
   }
 
-  console.log('[DottiSlateHelper] v4.5.0 ativo (menos cliques no popup)');
+  console.log('[DottiSlateHelper] v4.5.2 ativo (modo imagem)');
 })();

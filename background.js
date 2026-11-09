@@ -2740,16 +2740,22 @@ function _installExtendDownloadListener(pending) {
             const url = item.finalUrl || item.url || '';
             const fname = item.filename || '';
             const mime = item.mime || '';
+            // v4.5.2: imagem tambem. So video era aceito: no modo imagem o
+            // arquivo do Flow seria ignorado aqui e cairia solto em Downloads,
+            // com o nome do prompt, e o pendente ficaria preso na fila.
             const isVideo = /^video\//i.test(mime) ||
                 /\.(mp4|webm|mov|m4v)($|\?)/i.test(url) ||
                 /\.(mp4|webm|mov|m4v)$/i.test(fname);
-            if (!isVideo) {
-                console.log('[Extend] onCreated ignorado (nao-video): mime=' + mime + ' fname=' + fname);
+            const isImagem = /^image\//i.test(mime) ||
+                /\.(png|jpe?g|webp)($|\?)/i.test(url) ||
+                /\.(png|jpe?g|webp)$/i.test(fname);
+            if (!isVideo && !isImagem) {
+                console.log('[Extend] onCreated ignorado (nem video nem imagem): mime=' + mime + ' fname=' + fname);
                 return;
             }
 
             const next = _extendDownloadQueue.shift();
-            const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, 'mp4'])[1];
+            const ext = (fname.match(/\.([a-z0-9]+)$/i) || [, isImagem ? 'png' : 'mp4'])[1];
 
             // v3.8.0: nome exato do interceptor (mediaId -> prompt) tem
             // prioridade absoluta. Valido por 30s a partir do media-fetch.

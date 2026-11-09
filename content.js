@@ -187,10 +187,16 @@
         // (ha ate um log "[Extend] modelo resetou apos Estender"), entao
         // revalidamos a cada 10 prompts e em QUALQUER falha — velocidade nao
         // vale um video com duracao errada.
-        const _duracaoAlvo = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
+        // v4.5.2: imagem nao tem duracao nem usa o modelo de video. Pedir 8s e
+        // "Veo 3.1" para uma imagem fazia o popup ser julgado errado e o prompt
+        // nunca ser enviado.
+        const _ehImagem = (mediaTypeTarget === 'image');
+        const _duracaoAlvo = _ehImagem ? null
+            : ((duration === 4 || duration === 6 || duration === 8) ? duration : 8);
+        const _modeloDoModo = _ehImagem ? null : _MODELO_ALVO;
 
-        const _assinaturaModo = mediaTypeTarget + '|' + subMode + '|' + _duracaoAlvo +
-            '|' + (_firstPromptOfSession ? 'x1' : '-') + '|' + (_MODELO_ALVO || '-');
+        const _assinaturaModo = mediaTypeTarget + '|' + subMode + '|' + (_duracaoAlvo || '-') +
+            '|' + (_firstPromptOfSession ? 'x1' : '-') + '|' + (_modeloDoModo || '-');
 
         if (_modoAplicado === _assinaturaModo && _envriosDesdeRevalidacao < _REVALIDAR_MODO_A_CADA) {
             _envriosDesdeRevalidacao++;
@@ -210,7 +216,7 @@
         // ja mostra o que queremos e o resto (abas, modelo) foi confirmado
         // nesta execucao, nao ha nada a fazer. Cada popup aberto a toa e mais
         // clique sintetico — e o Flow esta acusando "atividade incomum".
-        if (!_revalidando && !_abasMudaram && !_firstPromptOfSession &&
+        if (!_ehImagem && !_revalidando && !_abasMudaram && !_firstPromptOfSession &&
             (!_MODELO_ALVO || _modeloConfirmadoNaExecucao)) {
             const rotuloCfg = _lerRotuloConfig();
             if (rotuloCfg && rotuloCfg.duracao === (_duracaoAlvo + 's') &&
@@ -230,11 +236,11 @@
             // Tabs nao visiveis — usar MAIN world PointerEvent via slate-helper.js
             console.log("[Dotti DOM] Abrindo seletor via MAIN world (sempre, p/ permitir set de duracao)");
 
-            const wantDuration = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
+            const wantDuration = _duracaoAlvo;   // null em imagem
             const result = await requestSlateHelper(
                 'dotti-switch-mode',
                 { mediaType: mediaTypeTarget, mode: subMode, setX1: _firstPromptOfSession,
-                  duration: wantDuration, modelo: _MODELO_ALVO,
+                  duration: wantDuration, modelo: _modeloDoModo,
                   // so clica nas abas quando o modo mudou ou na revalidacao:
                   // clicar numa aba FECHA o popup e obriga a reabrir.
                   abas: _abasMudaram || _revalidando },
@@ -252,7 +258,7 @@
                 // primeiro prompt. Era esse o bug.
                 let naoMemorizar = false;
                 const mdl = result.modelo || {};
-                if (_MODELO_ALVO) {
+                if (_modeloDoModo) {
                     console.log('[Dotti DOM] modelo: ' + (mdl.atual || '?') + ' (' + (mdl.via || 'sem resposta') + ')');
                     // "Sei que esta errado" bloqueia; "nao consigo mexer" nao.
                     // Modelo errado muda o custo em creditos por video.
@@ -276,7 +282,8 @@
                 }
 
                 const dur = result.duracao || {};
-                const duracaoOk = (dur.aplicada === true);
+                // Em imagem nao ha duracao a conferir: "ok" por definicao.
+                const duracaoOk = _ehImagem || (dur.aplicada === true);
                 // "Nao consigo ler o estado" nao e o mesmo que "sei que esta
                 // errado". No segundo caso nao envio — video com duracao errada
                 // gasta credito. No primeiro o botao certo FOI clicado (e tudo
@@ -315,9 +322,9 @@
                     _envriosDesdeRevalidacao = 0;
                     _ultimoMediaSub = _mediaSub;
                 }
-                if (_MODELO_ALVO && mdl.aplicado === true) _modeloConfirmadoNaExecucao = true;
+                if (_modeloDoModo && mdl.aplicado === true) _modeloConfirmadoNaExecucao = true;
                 console.log('[Dotti DOM] modo OK: media=' + mediaTypeTarget + ' sub=' + subMode +
-                    ' duracao=' + _duracaoAlvo + 's (' + dur.via + ')' +
+                    ' duracao=' + (_duracaoAlvo ? _duracaoAlvo + 's' : 'n/a') + ' (' + dur.via + ')' +
                     (result.resumo ? ' | configuracoes: "' + result.resumo + '"' : ''));
                 return true;
             }
@@ -2840,6 +2847,7 @@
     // 720p = arquivo original sem re-encode, que era o comportamento antigo.
     // NUNCA clicar no 4K: consome 50 creditos por video.
     const _QUALIDADE_ALVO = /^\s*720p\b/i;
+    const _QUALIDADE_ALVO_IMAGEM = /tamanho\s+original|original\s+size/i;
     const _QUALIDADE_PROIBIDA = /\b4K\b|cr[eé]dito/i;
 
     // O mesmo menu aparece em 3 containers aninhados (cdk-overlay-pane >
@@ -2928,18 +2936,32 @@
             return false;
         }
 
+        // v4.5.2: se "Fazer o download" nao abre submenu, o proprio clique ja
+        // baixa. Esperar um submenu que nao existe faria o passe contar falha
+        // para um download que aconteceu — e clicar de novo, duplicando.
+        const temSubmenu = itemDl.getAttribute('aria-haspopup') === 'menu';
         _clicarReal(itemDl);
+        if (!temSubmenu) {
+            console.log("[Dotti Download] download direto (sem submenu de qualidade)");
+            await sleep(400);
+            _fecharMenus();
+            return true;
+        }
 
-        // Submenu de resolucoes — aqui os itens NAO tem icone, entao a ancora
-        // e o texto. "720p" e numero, nao muda com o idioma.
+        // Submenu de qualidade — os itens NAO tem icone, entao a ancora e o
+        // texto. Video: "720p" (numero, nao muda com o idioma). Imagem: o item
+        // "Tamanho original", que e o arquivo sem re-encode e sem custo.
+        // NUNCA o que cobra credito (4K etc.).
+        const alvoQual = (_mediaType === 'image') ? _QUALIDADE_ALVO_IMAGEM : _QUALIDADE_ALVO;
         const itemQual = await _esperarItem(it => {
             const t = (it.innerText || "").trim();
-            return _QUALIDADE_ALVO.test(t) && !_QUALIDADE_PROIBIDA.test(t);
+            return alvoQual.test(t) && !_QUALIDADE_PROIBIDA.test(t);
         }, 3000);
 
         if (!itemQual) {
             const disponiveis = _itensDeMenu().map(i => (i.innerText || "").trim());
-            console.log("[Dotti Download] 720p nao encontrado. Opcoes:", disponiveis);
+            console.log("[Dotti Download] qualidade nao encontrada (" +
+                (_mediaType === 'image' ? 'Tamanho original' : '720p') + "). Opcoes:", disponiveis);
             _fecharMenus();
             return false;
         }
@@ -2992,6 +3014,13 @@
             if (!t.querySelector('button[aria-haspopup="menu"]')) return false;   // ainda gerando
             const r = _rotuloDoTile(t);
             if (!r || _tilesBaixados.has(r) || _tilesDesistidos.has(r)) return false;
+            // v4.5.2: se o clique anterior ja identificou este tile e o prompt
+            // dele esta baixado, nao ha o que fazer — clicar duplicaria.
+            const doTile = _rotuloParaPrompt.get(r);
+            if (doTile) {
+                const p = _promptList.find(x => x.number === doTile);
+                if (p && p.downloaded) { _tilesBaixados.add(r); return false; }
+            }
             const tent = _tentativasMenu.get(r);
             if (!tent) return true;
             return tent.n < _MAX_TENTATIVAS_MENU && (agora - tent.ultima) >= _ESPERA_ENTRE_TENTATIVAS_MENU;
@@ -6841,7 +6870,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.5.1 ready (um download por video)");
+        console.log("[Lets Automate] v4.5.2 ready (modo imagem)");
     }
 
     if (document.readyState === "loading") {
