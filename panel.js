@@ -1712,8 +1712,10 @@ function updateStatsDisplay(tab) {
 // ============================================
 // SENDING
 // ============================================
-async function startSending(tab) {
-    console.log("[Panel] startSending called for tab=" + tab);
+async function startSending(tab, opts) {
+    // v4.5.3: opts.continuar = botao "Continuar" (so os nunca enviados).
+    const continuar = !!(opts && opts.continuar);
+    console.log("[Panel] startSending called for tab=" + tab + (continuar ? " (continuar)" : ""));
     const st = tabState[tab];
 
     // Mutex: no other tab can be running
@@ -1735,12 +1737,23 @@ async function startSending(tab) {
     console.log("[Panel] startSending: session OK, tabId=" + currentTabId + ", starting...");
     updateBlockedOverlay();
 
+    // So o que NUNCA foi enviado. "sending", "sent", "error", "generated"...
+    // ja tocaram o Flow (ou falharam e sao caso do botao Reenviar, que e
+    // decisao dela) — nao entram aqui.
     const waitingPrompts = st.prompts.filter(p => p.status === "waiting");
-    if (waitingPrompts.length === 0) {
+    // No Continuar, mesmo sem prompt novo vale religar o motor se ainda ha
+    // video enviado sem download: e ele que baixa.
+    const faltaBaixar = continuar && st.prompts.some(p =>
+        p.status !== "waiting" && p.mediaStatus !== "downloaded");
+    if (waitingPrompts.length === 0 && !faltaBaixar) {
         updateStatus("success", "Todos enviados!");
         st.isRunning = false;
         updateBlockedOverlay();
         return;
+    }
+    if (continuar) {
+        console.log("[Panel] Continuar: " + waitingPrompts.length + " prompt(s) nunca enviado(s)" +
+            (faltaBaixar ? " + downloads pendentes" : ""));
     }
 
     // v3.1.0: Track batch size for correct progress during resend
@@ -1783,7 +1796,9 @@ async function startSending(tab) {
         folder: getFolder(tab)
     };
 
-    updateStatus("running", "Iniciando envio de " + waitingPrompts.length + " prompts...");
+    updateStatus("running", continuar
+        ? ("Continuando: " + waitingPrompts.length + " prompt(s) nunca enviado(s)...")
+        : ("Iniciando envio de " + waitingPrompts.length + " prompts..."));
     startStatePolling(tab);
 
     // v3.1.0: NAO enviar START_SCANNER aqui — START_AUTOMATION (via background.js) ja configura
@@ -1800,7 +1815,8 @@ async function startSending(tab) {
             settings: settings,
             tabId: currentTabId,
             mediaType: tab,
-            backgroundMode: backgroundMode
+            backgroundMode: backgroundMode,
+            continuar: continuar
         });
         console.log("[Panel] startSending: START_QUEUE result", JSON.stringify(result));
         if (result && !result.success) {
@@ -1821,25 +1837,20 @@ async function startSending(tab) {
                 settings: settings,
                 folder: getFolder(tab),
                 mediaType: tab,
-                autoDownload: autoDownload
+                autoDownload: autoDownload,
+                continuar: continuar
             }
         }, "*");
     }
 }
 
+// v4.5.3: "Continuar" envia SO os prompts nunca enviados. Antes ele mandava
+// RESUME_QUEUE, e o background retomava a fila INTEIRA do inicio pelo
+// processador legado — podendo reenviar o que ja tinha ido. Agora usa o mesmo
+// caminho do "Iniciar", filtrado pelos "waiting"; o motor mantem os enviados
+// que ainda nao baixaram e termina esses downloads.
 async function continueSending(tab) {
-    const st = tabState[tab];
-    st.isRunning = true;
-    updateBlockedOverlay();
-    el(tab, "startBtn").classList.add("hidden");
-    el(tab, "stopBtn").classList.remove("hidden");
-    el(tab, "emergencyStopBtn").classList.remove("hidden");
-    el(tab, "cancelAllBtn").classList.remove("hidden");
-    updateStatus("running", "Retomando envio...");
-    startStatePolling(tab);
-
-    try { await chrome.runtime.sendMessage({ action: "RESUME_QUEUE", backgroundMode: backgroundMode }); }
-    catch (e) { window.parent.postMessage({ type: "RESUME_QUEUE" }, "*"); }
+    return startSending(tab, { continuar: true });
 }
 
 async function stopSending(tab) {

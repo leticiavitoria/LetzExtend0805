@@ -187,10 +187,16 @@
         // (ha ate um log "[Extend] modelo resetou apos Estender"), entao
         // revalidamos a cada 10 prompts e em QUALQUER falha — velocidade nao
         // vale um video com duracao errada.
-        const _duracaoAlvo = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
+        // v4.5.2: imagem nao tem duracao nem usa o modelo de video. Pedir 8s e
+        // "Veo 3.1" para uma imagem fazia o popup ser julgado errado e o prompt
+        // nunca ser enviado.
+        const _ehImagem = (mediaTypeTarget === 'image');
+        const _duracaoAlvo = _ehImagem ? null
+            : ((duration === 4 || duration === 6 || duration === 8) ? duration : 8);
+        const _modeloDoModo = _ehImagem ? null : _MODELO_ALVO;
 
-        const _assinaturaModo = mediaTypeTarget + '|' + subMode + '|' + _duracaoAlvo +
-            '|' + (_firstPromptOfSession ? 'x1' : '-') + '|' + (_MODELO_ALVO || '-');
+        const _assinaturaModo = mediaTypeTarget + '|' + subMode + '|' + (_duracaoAlvo || '-') +
+            '|' + (_firstPromptOfSession ? 'x1' : '-') + '|' + (_modeloDoModo || '-');
 
         if (_modoAplicado === _assinaturaModo && _envriosDesdeRevalidacao < _REVALIDAR_MODO_A_CADA) {
             _envriosDesdeRevalidacao++;
@@ -210,7 +216,7 @@
         // ja mostra o que queremos e o resto (abas, modelo) foi confirmado
         // nesta execucao, nao ha nada a fazer. Cada popup aberto a toa e mais
         // clique sintetico — e o Flow esta acusando "atividade incomum".
-        if (!_revalidando && !_abasMudaram && !_firstPromptOfSession &&
+        if (!_ehImagem && !_revalidando && !_abasMudaram && !_firstPromptOfSession &&
             (!_MODELO_ALVO || _modeloConfirmadoNaExecucao)) {
             const rotuloCfg = _lerRotuloConfig();
             if (rotuloCfg && rotuloCfg.duracao === (_duracaoAlvo + 's') &&
@@ -230,11 +236,11 @@
             // Tabs nao visiveis — usar MAIN world PointerEvent via slate-helper.js
             console.log("[Dotti DOM] Abrindo seletor via MAIN world (sempre, p/ permitir set de duracao)");
 
-            const wantDuration = (duration === 4 || duration === 6 || duration === 8) ? duration : 8;
+            const wantDuration = _duracaoAlvo;   // null em imagem
             const result = await requestSlateHelper(
                 'dotti-switch-mode',
                 { mediaType: mediaTypeTarget, mode: subMode, setX1: _firstPromptOfSession,
-                  duration: wantDuration, modelo: _MODELO_ALVO,
+                  duration: wantDuration, modelo: _modeloDoModo,
                   // so clica nas abas quando o modo mudou ou na revalidacao:
                   // clicar numa aba FECHA o popup e obriga a reabrir.
                   abas: _abasMudaram || _revalidando },
@@ -252,7 +258,7 @@
                 // primeiro prompt. Era esse o bug.
                 let naoMemorizar = false;
                 const mdl = result.modelo || {};
-                if (_MODELO_ALVO) {
+                if (_modeloDoModo) {
                     console.log('[Dotti DOM] modelo: ' + (mdl.atual || '?') + ' (' + (mdl.via || 'sem resposta') + ')');
                     // "Sei que esta errado" bloqueia; "nao consigo mexer" nao.
                     // Modelo errado muda o custo em creditos por video.
@@ -276,7 +282,8 @@
                 }
 
                 const dur = result.duracao || {};
-                const duracaoOk = (dur.aplicada === true);
+                // Em imagem nao ha duracao a conferir: "ok" por definicao.
+                const duracaoOk = _ehImagem || (dur.aplicada === true);
                 // "Nao consigo ler o estado" nao e o mesmo que "sei que esta
                 // errado". No segundo caso nao envio — video com duracao errada
                 // gasta credito. No primeiro o botao certo FOI clicado (e tudo
@@ -315,9 +322,9 @@
                     _envriosDesdeRevalidacao = 0;
                     _ultimoMediaSub = _mediaSub;
                 }
-                if (_MODELO_ALVO && mdl.aplicado === true) _modeloConfirmadoNaExecucao = true;
+                if (_modeloDoModo && mdl.aplicado === true) _modeloConfirmadoNaExecucao = true;
                 console.log('[Dotti DOM] modo OK: media=' + mediaTypeTarget + ' sub=' + subMode +
-                    ' duracao=' + _duracaoAlvo + 's (' + dur.via + ')' +
+                    ' duracao=' + (_duracaoAlvo ? _duracaoAlvo + 's' : 'n/a') + ' (' + dur.via + ')' +
                     (result.resumo ? ' | configuracoes: "' + result.resumo + '"' : ''));
                 return true;
             }
@@ -2840,6 +2847,7 @@
     // 720p = arquivo original sem re-encode, que era o comportamento antigo.
     // NUNCA clicar no 4K: consome 50 creditos por video.
     const _QUALIDADE_ALVO = /^\s*720p\b/i;
+    const _QUALIDADE_ALVO_IMAGEM = /tamanho\s+original|original\s+size/i;
     const _QUALIDADE_PROIBIDA = /\b4K\b|cr[eé]dito/i;
 
     // O mesmo menu aparece em 3 containers aninhados (cdk-overlay-pane >
@@ -2928,18 +2936,32 @@
             return false;
         }
 
+        // v4.5.2: se "Fazer o download" nao abre submenu, o proprio clique ja
+        // baixa. Esperar um submenu que nao existe faria o passe contar falha
+        // para um download que aconteceu — e clicar de novo, duplicando.
+        const temSubmenu = itemDl.getAttribute('aria-haspopup') === 'menu';
         _clicarReal(itemDl);
+        if (!temSubmenu) {
+            console.log("[Dotti Download] download direto (sem submenu de qualidade)");
+            await sleep(400);
+            _fecharMenus();
+            return true;
+        }
 
-        // Submenu de resolucoes — aqui os itens NAO tem icone, entao a ancora
-        // e o texto. "720p" e numero, nao muda com o idioma.
+        // Submenu de qualidade — os itens NAO tem icone, entao a ancora e o
+        // texto. Video: "720p" (numero, nao muda com o idioma). Imagem: o item
+        // "Tamanho original", que e o arquivo sem re-encode e sem custo.
+        // NUNCA o que cobra credito (4K etc.).
+        const alvoQual = (_mediaType === 'image') ? _QUALIDADE_ALVO_IMAGEM : _QUALIDADE_ALVO;
         const itemQual = await _esperarItem(it => {
             const t = (it.innerText || "").trim();
-            return _QUALIDADE_ALVO.test(t) && !_QUALIDADE_PROIBIDA.test(t);
+            return alvoQual.test(t) && !_QUALIDADE_PROIBIDA.test(t);
         }, 3000);
 
         if (!itemQual) {
             const disponiveis = _itensDeMenu().map(i => (i.innerText || "").trim());
-            console.log("[Dotti Download] 720p nao encontrado. Opcoes:", disponiveis);
+            console.log("[Dotti Download] qualidade nao encontrada (" +
+                (_mediaType === 'image' ? 'Tamanho original' : '720p') + "). Opcoes:", disponiveis);
             _fecharMenus();
             return false;
         }
@@ -2992,6 +3014,13 @@
             if (!t.querySelector('button[aria-haspopup="menu"]')) return false;   // ainda gerando
             const r = _rotuloDoTile(t);
             if (!r || _tilesBaixados.has(r) || _tilesDesistidos.has(r)) return false;
+            // v4.5.2: se o clique anterior ja identificou este tile e o prompt
+            // dele esta baixado, nao ha o que fazer — clicar duplicaria.
+            const doTile = _rotuloParaPrompt.get(r);
+            if (doTile) {
+                const p = _promptList.find(x => x.number === doTile);
+                if (p && p.downloaded) { _tilesBaixados.add(r); return false; }
+            }
             const tent = _tentativasMenu.get(r);
             if (!tent) return true;
             return tent.n < _MAX_TENTATIVAS_MENU && (agora - tent.ultima) >= _ESPERA_ENTRE_TENTATIVAS_MENU;
@@ -3119,17 +3148,68 @@
         _avisouSemScroller = false;
     }
 
-    // setPromptList — com campos identicos ao taskList do DarkPlanner
-    function setPromptList(prompts, folder, mediaType, autoDownload) {
-        // Pre-scan de videos existentes no DOM (identico DarkPlanner scanExistingVideos)
-        const existingUrls = scanExistingVideos();
-        for (const url of existingUrls) {
-            _downloadedVideoUrls.add(url);
+    // ============================================================
+    // v4.5.3 — CONTINUAR: so os prompts NUNCA enviados
+    // ============================================================
+    // Regra dela: o "Continuar" envia so o que nunca foi enviado. O painel ja
+    // manda so os "waiting"; aqui o motor MANTEM o que foi enviado antes da
+    // parada e ainda nao baixou — com as amarracoes mediaId -> prompt, os
+    // tiles ja baixados e os contadores — para que esses videos ainda sejam
+    // baixados. Antes, o Continuar ia para o processador legado do background
+    // com a fila INTEIRA do inicio, e podia reenviar o que ja tinha ido.
+    function _continuarPromptList(prompts, folder, mediaType, autoDownload) {
+        const mantidos = [];
+        for (const t of _promptList) {
+            if (!t.startedAt || t.downloaded) continue;
+            // Enviado e nao baixado: volta a "gerando" e o relogio do teto e
+            // rearmado — o video pode ter ficado pronto durante a parada.
+            t.status = 'generating';
+            t.failType = null;
+            t.error = null;
+            _statusRecebidoEm.set(t.number, Date.now());
+            mantidos.push(t);
         }
-        _nextItemIndex = existingUrls.size; // Comecar contagem a partir dos itens existentes
 
-        // Task objects com campos identicos ao DarkPlanner taskList
-        _promptList = (prompts || []).map((p, i) => ({
+        const jaNoMotor = new Set(mantidos.map(t => t.number));
+        const enviadosAntes = new Set(_promptList.filter(t => t.startedAt).map(t => t.number));
+        const novos = [];
+        for (const p of (prompts || [])) {
+            // Nunca reenviar: um numero que ja foi enviado nesta execucao fica de fora.
+            if (enviadosAntes.has(p.number) || jaNoMotor.has(p.number)) {
+                console.warn('[Dotti] Continuar: #' + p.number + ' ja foi enviado antes — NAO reenvio');
+                continue;
+            }
+            novos.push(p);
+        }
+
+        _promptList = mantidos.concat(novos.map((p, i) => _novaTarefa(p, mantidos.length + i)));
+        _promptList.forEach((t, i) => { t.index = i; });
+
+        _downloadFolder = folder || _downloadFolder || 'LetzVideos';
+        _mediaType = mediaType || _mediaType || 'video';
+        _autoDownload = autoDownload !== false;
+
+        // So o estado de ENVIO recomeca. Identidade, tiles e contadores ficam.
+        _sendLockByIndex.clear();
+        _consecutiveErrorCount = 0;
+        _pendingRewrites = 0;
+        _stopRequested = false;
+        _activeSlots = 0;
+        _recentHighDemandError = false;
+        _lastSubmittedTaskIndex = -1;
+        // O Flow pode ter mudado de modo durante a parada: o primeiro envio
+        // confere o popup de novo.
+        _modoAplicado = null;
+
+        console.log('[Dotti] Continuar: ' + novos.length + ' prompt(s) nunca enviado(s) + ' +
+            mantidos.length + ' enviado(s) antes ainda sem download' +
+            (mantidos.length ? ' (' + mantidos.map(t => '#' + t.number).join(', ') + ')' : ''));
+    }
+
+    // Objeto de tarefa do motor (campos identicos ao taskList do DarkPlanner).
+    // v4.5.3: extraido do setPromptList para o "Continuar" reusar.
+    function _novaTarefa(p, i) {
+        return {
             index: i,                        // posicao na taskList (0-based)
             number: p.number,                // numero do prompt (1-based)
             duration: p.duration || 8,       // duracao do video em segundos (4/6/8)
@@ -3159,7 +3239,20 @@
             image: null,
             imageDataUrl: p.imageDataUrl || null,  // v3.4.0: Frame image data URL
             imageName: p.imageName || null          // v3.4.0: Frame image filename
-        }));
+        };
+    }
+
+    // setPromptList — com campos identicos ao taskList do DarkPlanner
+    function setPromptList(prompts, folder, mediaType, autoDownload) {
+        // Pre-scan de videos existentes no DOM (identico DarkPlanner scanExistingVideos)
+        const existingUrls = scanExistingVideos();
+        for (const url of existingUrls) {
+            _downloadedVideoUrls.add(url);
+        }
+        _nextItemIndex = existingUrls.size; // Comecar contagem a partir dos itens existentes
+
+        // Task objects com campos identicos ao DarkPlanner taskList
+        _promptList = (prompts || []).map((p, i) => _novaTarefa(p, i));
         _downloadFolder = folder || 'LetzVideos';
         _mediaType = mediaType || 'video';
         _autoDownload = autoDownload !== false;
@@ -6073,7 +6166,7 @@
                         // (background.js faz sleep(2000) antes de enviar START_AUTOMATION)
                         _stopRequested = false;
 
-                        const { prompts, settings, mediaType, folder, autoDownload } = message;
+                        const { prompts, settings, mediaType, folder, autoDownload, continuar } = message;
                         _maxSimultaneous = settings?.maxSimultaneous || 3;
                         _currentQueueSettings = settings || {};
                         _currentQueueMediaType = mediaType || 'video';
@@ -6083,11 +6176,16 @@
                         // entao scanExistingVideos() nao encontra todos os videos antigos
                         const previouslyDownloaded = new Set(_downloadedVideoUrls);
 
-                        // Reset scanner
-                        resetVideoUrlScanner();
+                        if (continuar && _promptList.length) {
+                            // v4.5.3: Continuar — mantem o que ja foi enviado, nao reseta nada.
+                            _continuarPromptList(prompts, folder, mediaType, autoDownload);
+                        } else {
+                            // Reset scanner
+                            resetVideoUrlScanner();
 
-                        // Configurar prompt list com task objects
-                        setPromptList(prompts, folder, mediaType, autoDownload);
+                            // Configurar prompt list com task objects
+                            setPromptList(prompts, folder, mediaType, autoDownload);
+                        }
 
                         // Restaurar URLs previamente baixadas (que react-virtuoso removeu do DOM)
                         for (const url of previouslyDownloaded) {
@@ -6099,7 +6197,8 @@
                             requestFetchIntercept(settings.outputCount);
                         }
 
-                        console.log('[Dotti] START_AUTOMATION: ' + prompts.length + ' prompts, ' + _maxSimultaneous + ' slots simultaneos');
+                        console.log('[Dotti] START_AUTOMATION' + (continuar ? ' (continuar)' : '') + ': ' +
+                            prompts.length + ' prompts, ' + _maxSimultaneous + ' slots simultaneos');
 
                         // Iniciar processamento (nao bloqueia — roda em paralelo)
                         processAllPromptsWithSlots();
@@ -6496,24 +6595,29 @@
         switch (type) {
             case "START_QUEUE":
                 _firstPromptOfSession = true; // v2.0.2: resetar para garantir x1 no primeiro prompt
-                // v3.1.0: Preservar URLs ja baixadas antes do reset (react-virtuoso)
-                const _prevDownloaded = new Set(_downloadedVideoUrls);
-                resetVideoUrlScanner();
-                // Receber prompt list do panel para matching no scanner
-                setPromptList(
-                    data.prompts,
-                    data.folder || 'LetzVideos',
-                    data.mediaType || 'video',
-                    data.autoDownload !== false
-                );
-                for (const _u of _prevDownloaded) _downloadedVideoUrls.add(_u);
-                startVideoUrlScanner();
+                if (!data.continuar) {
+                    // v3.1.0: Preservar URLs ja baixadas antes do reset (react-virtuoso)
+                    const _prevDownloaded = new Set(_downloadedVideoUrls);
+                    resetVideoUrlScanner();
+                    // Receber prompt list do panel para matching no scanner
+                    setPromptList(
+                        data.prompts,
+                        data.folder || 'LetzVideos',
+                        data.mediaType || 'video',
+                        data.autoDownload !== false
+                    );
+                    for (const _u of _prevDownloaded) _downloadedVideoUrls.add(_u);
+                    startVideoUrlScanner();
+                }
+                // v4.5.3: no Continuar a lista e montada pelo START_AUTOMATION,
+                // que mantem o que ja foi enviado.
                 chrome.runtime.sendMessage({
                     action: "START_QUEUE",
                     prompts: data.prompts,
                     settings: data.settings,
                     tabId: await getCurrentTabId(),
-                    mediaType: data.mediaType
+                    mediaType: data.mediaType,
+                    continuar: !!data.continuar
                 });
                 break;
 
@@ -6841,7 +6945,7 @@
             }
         }, 3000);
 
-        console.log("[Lets Automate] v4.5.1 ready (um download por video)");
+        console.log("[Lets Automate] v4.5.3 ready (continuar so o nunca enviado)");
     }
 
     if (document.readyState === "loading") {
